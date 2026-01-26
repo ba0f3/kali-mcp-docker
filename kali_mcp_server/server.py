@@ -766,19 +766,51 @@ def start_sse_server(port: int, debug: bool) -> int:
 
     async def handle_sse_connection(request):
         """Handle incoming SSE connections."""
-        async with sse_transport.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
-            await kali_server.run(
-                streams[0], streams[1], kali_server.create_initialization_options()
-            )
+        try:
+            async with sse_transport.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await kali_server.run(
+                    streams[0], streams[1], kali_server.create_initialization_options()
+                )
+        except Exception as e:
+            if debug:
+                import traceback
+                print(f"SSE connection error: {e}")
+                traceback.print_exc()
+            # Connection closed or error - this is normal for SSE disconnects
+            pass
+
+    class PostMessageApp:
+        """ASGI app wrapper for handle_post_message with error handling."""
+        def __init__(self, transport):
+            self.transport = transport
+            self.debug = debug
+        
+        async def __call__(self, scope, receive, send):
+            try:
+                await self.transport.handle_post_message(scope, receive, send)
+            except Exception as e:
+                # Handle ClosedResourceError and other connection errors gracefully
+                from anyio import ClosedResourceError
+                if isinstance(e, ClosedResourceError):
+                    # Client disconnected - this is normal for SSE disconnects
+                    # Connection is already closed, so we can't send a response
+                    # Just return silently
+                    return
+                # Re-raise other exceptions
+                if self.debug:
+                    import traceback
+                    print(f"Post message error: {e}")
+                    traceback.print_exc()
+                raise
 
     # Configure Starlette routes
     starlette_app = Starlette(
         debug=debug,
         routes=[
             Route("/sse", endpoint=handle_sse_connection),
-            Mount("/messages/", app=sse_transport.handle_post_message),
+            Mount("/messages/", app=PostMessageApp(sse_transport)),
         ],
     )
 
