@@ -8,4 +8,4 @@ docker build -t kali-mcp-server .
 
 echo "===== Running Docker container ====="
 echo "The server will be available at http://localhost:8000/sse"
-docker run -p 8000:8000 kali-mcp-server
+docker run --privileged -p 8000:8000 kali-mcp-server

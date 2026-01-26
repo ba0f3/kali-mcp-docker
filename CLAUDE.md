@@ -15,7 +15,7 @@ This is a production-ready MCP (Model Context Protocol) server running in a Kali
 docker build -t kali-mcp-server .
 
 # Run with default settings (SSE mode on port 8000)
-docker run -p 8000:8000 kali-mcp-server
+docker run --privileged -p 8000:8000 kali-mcp-server
 
 # Run the tests
 ./run_tests.sh
@@ -90,7 +90,7 @@ The MCP server is designed to be used with Claude Desktop by adding a configurat
     "kali-mcp-server": {
       "transport": "sse",
       "url": "http://localhost:8000/sse",
-      "command": "docker run -p 8000:8000 kali-mcp-server"
+      "command": "docker run --privileged -p 8000:8000 kali-mcp-server"
     }
   }
 }
