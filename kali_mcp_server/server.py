@@ -35,7 +35,12 @@ from kali_mcp_server.tools import (
     header_analysis,
     ssl_analysis,
     subdomain_enum,
-    web_audit
+    web_audit,
+    msf_exploit,
+    nmap_nse_scan,
+    task_list,
+    task_stop,
+    task_logs
 )
 
 # Create server instance with descriptive name
@@ -184,6 +189,36 @@ async def handle_tool_request(
             raise ValueError("Missing required argument 'url'")
         audit_type = arguments.get("audit_type", "comprehensive")
         return await web_audit(arguments["url"], audit_type)
+
+    elif name == "msf_exploit":
+        if "module" not in arguments:
+            raise ValueError("Missing required argument 'module'")
+        if "rhosts" not in arguments:
+            raise ValueError("Missing required argument 'rhosts'")
+        options = arguments.get("options", "")
+        return await msf_exploit(arguments["module"], arguments["rhosts"], options)
+    
+    elif name == "nmap_nse_scan":
+        if "target" not in arguments:
+            raise ValueError("Missing required argument 'target'")
+        if "scripts" not in arguments:
+            raise ValueError("Missing required argument 'scripts'")
+        ports = arguments.get("ports", "1-65535")
+        return await nmap_nse_scan(arguments["target"], arguments["scripts"], ports)
+
+    elif name == "task_list":
+        return await task_list()
+    
+    elif name == "task_stop":
+        if "task_id" not in arguments:
+            raise ValueError("Missing required argument 'task_id'")
+        return await task_stop(arguments["task_id"])
+    
+    elif name == "task_logs":
+        if "task_id" not in arguments:
+            raise ValueError("Missing required argument 'task_id'")
+        lines = arguments.get("lines", 20)
+        return await task_logs(arguments["task_id"], lines)
     
     else:
         raise ValueError(f"Unknown tool: {name}")
@@ -585,6 +620,92 @@ async def list_available_tools() -> List[types.Tool]:
                         "description": "Type of audit (comprehensive, quick)",
                         "enum": ["comprehensive", "quick"],
                         "default": "comprehensive"
+                    }
+                },
+            },
+        ),
+        types.Tool(
+            name="msf_exploit",
+            description="Execute a Metasploit module against a target",
+            inputSchema={
+                "type": "object",
+                "required": ["module", "rhosts"],
+                "properties": {
+                    "module": {
+                        "type": "string",
+                        "description": "Metasploit module (e.g., 'exploit/windows/smb/ms17_010_eternalblue')",
+                    },
+                    "rhosts": {
+                        "type": "string",
+                        "description": "Target host(s)",
+                    },
+                    "options": {
+                        "type": "string",
+                        "description": "Additional MSF options (e.g., 'PAYLOAD=windows/x64/meterpreter/reverse_tcp')",
+                    }
+                },
+            },
+        ),
+        types.Tool(
+            name="nmap_nse_scan",
+            description="Perform targeted Nmap NSE script scan",
+            inputSchema={
+                "type": "object",
+                "required": ["target", "scripts"],
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": "Target IP or hostname",
+                    },
+                    "scripts": {
+                        "type": "string",
+                        "description": "NSE scripts to run (e.g., 'vuln', 'http-enum')",
+                    },
+                    "ports": {
+                        "type": "string",
+                        "description": "Ports to scan",
+                        "default": "1-65535"
+                    }
+                },
+            },
+        ),
+        types.Tool(
+            name="task_list",
+            description="List all background security tasks",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        types.Tool(
+            name="task_stop",
+            description="Stop a running background task",
+            inputSchema={
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the task to stop",
+                    }
+                },
+            },
+        ),
+        types.Tool(
+            name="task_logs",
+            description="Get real-time logs for a background task",
+            inputSchema={
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "ID of the task to get logs for",
+                    },
+                    "lines": {
+                        "type": "integer",
+                        "description": "Number of lines to return",
+                        "default": 20
                     }
                 },
             },

@@ -1,0 +1,16 @@
+services:
+  kali-mcp-server:
+    image: ghcr.io/${GITHUB_OWNER:-ba0f3}/kali-mcp-docker:${IMAGE_TAG:-main}
+    container_name: kali-mcp-server
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+    # Uncomment and set if you need to pull from a private registry
+    # environment:
+    #   - GITHUB_TOKEN=${GITHUB_TOKEN}
+    # Uncomment if authentication is required for private images
+    # registry_auth:
+    #   username: ${GITHUB_USERNAME}
+    #   password: ${GITHUB_TOKEN}
