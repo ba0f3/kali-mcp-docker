@@ -759,13 +759,17 @@ def start_sse_server(port: int, debug: bool) -> int:
     import uvicorn
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
+    from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    # Create SSE transport handler
+    # Create SSE transport handler for legacy /sse + /messages/
     sse_transport = SseServerTransport("/messages/")
 
+    # Create Streamable HTTP transport for single /mcp endpoint (GET=SSE, POST=messages)
+    mcp_transport = SseServerTransport("/mcp")
+
     async def handle_sse_connection(request):
-        """Handle incoming SSE connections."""
+        """Handle incoming SSE connections at /sse."""
         try:
             async with sse_transport.connect_sse(
                 request.scope, request.receive, request._send
@@ -780,13 +784,50 @@ def start_sse_server(port: int, debug: bool) -> int:
                 traceback.print_exc()
             # Connection closed or error - this is normal for SSE disconnects
             pass
+        return Response()
+
+    async def handle_mcp_get(request):
+        """Handle GET /mcp: establish SSE stream for Streamable HTTP."""
+        try:
+            async with mcp_transport.connect_sse(
+                request.scope, request.receive, request._send
+            ) as streams:
+                await kali_server.run(
+                    streams[0], streams[1], kali_server.create_initialization_options()
+                )
+        except Exception as e:
+            if debug:
+                import traceback
+                print(f"MCP SSE connection error: {e}")
+                traceback.print_exc()
+            pass
+        return Response()
+
+    async def handle_mcp_post(request):
+        """Handle POST /mcp: accept JSON-RPC messages (Streamable HTTP). Supports session via query or Mcp-Session-Id header."""
+        scope = dict(request.scope)
+        session_header = request.headers.get("mcp-session-id") or request.headers.get("Mcp-Session-Id")
+        if session_header:
+            qs = scope.get("query_string", b"").decode()
+            scope["query_string"] = (f"session_id={session_header}" if not qs else f"{qs}&session_id={session_header}").encode()
+        try:
+            await mcp_transport.handle_post_message(scope, request.receive, request._send)
+        except Exception as e:
+            from anyio import ClosedResourceError
+            if isinstance(e, ClosedResourceError):
+                return
+            if debug:
+                import traceback
+                print(f"MCP POST error: {e}")
+                traceback.print_exc()
+            raise
 
     class PostMessageApp:
         """ASGI app wrapper for handle_post_message with error handling."""
         def __init__(self, transport):
             self.transport = transport
             self.debug = debug
-        
+
         async def __call__(self, scope, receive, send):
             try:
                 await self.transport.handle_post_message(scope, receive, send)
@@ -805,18 +846,21 @@ def start_sse_server(port: int, debug: bool) -> int:
                     traceback.print_exc()
                 raise
 
-    # Configure Starlette routes
+    # Configure Starlette routes: legacy SSE + Streamable HTTP /mcp
     starlette_app = Starlette(
         debug=debug,
         routes=[
             Route("/sse", endpoint=handle_sse_connection),
             Mount("/messages/", app=PostMessageApp(sse_transport)),
+            Route("/mcp", endpoint=handle_mcp_get, methods=["GET"]),
+            Route("/mcp", endpoint=handle_mcp_post, methods=["POST"]),
         ],
     )
 
     # Run the server
     print(f"Starting Kali MCP Server with SSE transport on port {port}")
-    print(f"Connect to this server using: http://localhost:{port}/sse")
+    print(f"Connect using SSE: http://localhost:{port}/sse")
+    print(f"Connect using Streamable HTTP: http://localhost:{port}/mcp")
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)
     return 0
 
