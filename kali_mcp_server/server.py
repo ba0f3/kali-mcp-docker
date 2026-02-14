@@ -762,10 +762,7 @@ def start_sse_server(port: int, debug: bool) -> int:
     import contextlib
     import uvicorn
     from mcp.server.sse import SseServerTransport
-    from mcp.server.streamable_http_manager import (
-        StreamableHTTPASGIApp,
-        StreamableHTTPSessionManager,
-    )
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from starlette.applications import Starlette
     from starlette.responses import Response
     from starlette.routing import Mount, Route
@@ -773,13 +770,42 @@ def start_sse_server(port: int, debug: bool) -> int:
     # Legacy SSE transport for /sse + /messages/
     sse_transport = SseServerTransport("/messages/")
 
-    # Streamable HTTP: session manager + ASGI app for /mcp (requires lifespan).
+    # Adapter so StreamableHTTPSessionManager can call run(..., stateless=) even when
+    # the installed mcp Server.run() does not accept the stateless parameter.
+    class _StreamableHTTPServerAdapter:
+        def __init__(self, server):
+            self._server = server
+
+        def __getattr__(self, name):
+            return getattr(self._server, name)
+
+        async def run(self, read_stream, write_stream, init_options, stateless=None):
+            try:
+                return await self._server.run(
+                    read_stream, write_stream, init_options, stateless=stateless
+                )
+            except TypeError:
+                return await self._server.run(
+                    read_stream, write_stream, init_options
+                )
+
+    # Streamable HTTP: session manager for /mcp (requires lifespan).
     streamable_session_manager = StreamableHTTPSessionManager(
-        kali_server,
+        _StreamableHTTPServerAdapter(kali_server),
         json_response=True,
         stateless=False,
     )
-    streamable_http_app = StreamableHTTPASGIApp(streamable_session_manager)
+
+    class StreamableHTTPApp:
+        """ASGI app that delegates to StreamableHTTPSessionManager.handle_request."""
+
+        def __init__(self, session_manager: StreamableHTTPSessionManager):
+            self._session_manager = session_manager
+
+        async def __call__(self, scope, receive, send):
+            await self._session_manager.handle_request(scope, receive, send)
+
+    streamable_http_app = StreamableHTTPApp(streamable_session_manager)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: Starlette):

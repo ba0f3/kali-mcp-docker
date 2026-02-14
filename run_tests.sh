@@ -3,6 +3,8 @@
 
 set -e  # Exit on error
 
+export PATH="/opt/homebrew/bin:$PATH"
+
 echo "===== Setting up virtual environment ====="
 python3 -m venv .venv
 source .venv/bin/activate
