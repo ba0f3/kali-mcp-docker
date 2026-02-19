@@ -34,28 +34,21 @@ RUN apt-get update && apt-get install -y \
 RUN go install github.com/tomnomnom/waybackurls@latest && \
     cp /root/go/bin/waybackurls /usr/local/bin/
 
-# Create a non-root user to run the application
-RUN groupadd -r mcpuser && useradd -r -g mcpuser -m -d /home/mcpuser mcpuser
-
-# Create app directories with correct permissions
 WORKDIR /app
-COPY --chown=mcpuser:mcpuser . /app/
 
-# Create and activate virtual environment
+# Copy only dependency files first so dependency install is cached when only code changes
+COPY requirements.txt .
+
+# Create venv and install Python dependencies (cached unless requirements.txt changes)
 RUN python3 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
+RUN pip install --no-cache-dir -v uv && pip install --no-cache-dir -v -r requirements.txt
 
-# Install uv package manager
-RUN pip install --no-cache-dir -v uv
+# Copy application code (this layer rebuilds only when source files change)
+COPY . /app/
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -v -r requirements.txt
-
-# Ensure appropriate output directory permissions 
-RUN touch /app/command_output.txt && chown mcpuser:mcpuser /app/command_output.txt
-
-# Switch to the non-root user
-USER mcpuser
+# Ensure output directories and files exist
+RUN touch /app/command_output.txt && mkdir -p /app/outputs /app/sessions
 
 # Expose port for SSE
 EXPOSE 8000

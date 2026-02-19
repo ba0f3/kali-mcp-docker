@@ -101,38 +101,84 @@ ALLOWED_COMMANDS = [
 ]
 
 # --- Session Management Backend ---
-SESSIONS_DIR = "sessions"
+# Use absolute path for sessions directory to avoid permission issues
+# Default to /app/sessions (Docker), fallback to cwd/sessions for local dev
+SESSIONS_DIR = os.environ.get("MCP_SESSIONS_DIR", "/app/sessions")
 ACTIVE_SESSION_FILE = os.path.join(SESSIONS_DIR, "active_session.txt")
 
 # --- Background Task Management ---
 BACKGROUND_TASKS = {} # taskId -> {process, command, startTime, outputFile, status}
 
+
+def _json_response(
+    tool: str,
+    success: bool,
+    message: str = "",
+    data: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> Sequence[types.TextContent]:
+    """Return a single TextContent with JSON payload for all tool responses."""
+    payload: dict = {"tool": tool, "success": success}
+    if message:
+        payload["message"] = message
+    if data is not None:
+        payload["data"] = data
+    if error is not None:
+        payload["error"] = error
+    return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+
 def get_current_session_dir():
     active = load_active_session()
     if active:
         return get_session_path(active)
-    return "."
+    # Use absolute path to /app/outputs (or current working directory if /app doesn't exist)
+    # This ensures we always write to a writable location
+    cwd = os.getcwd()
+    outputs_dir = os.path.join(cwd, "outputs")
+    # Ensure outputs directory exists and is writable
+    try:
+        os.makedirs(outputs_dir, exist_ok=True)
+        return outputs_dir
+    except (OSError, PermissionError):
+        # Fallback to current directory if we can't create outputs/
+        return cwd
 
 def get_output_path(filename: str) -> str:
     """Prepend the current session directory if active and path is relative."""
     if os.path.isabs(filename) or filename.startswith(SESSIONS_DIR):
         return filename
-    return os.path.join(get_current_session_dir(), filename)
+    base_dir = get_current_session_dir()
+    # Ensure we return an absolute path
+    result = os.path.join(base_dir, filename)
+    return os.path.abspath(result)
 
 async def register_background_task(command: str, output_file: str) -> str:
     """Register and start a background task."""
     task_id = f"task_{int(asyncio.get_event_loop().time())}"
     
-    # Ensure output_file is in the current session dir if it doesn't have a path
+    # Ensure output_file is absolute so redirects write to the same file we touch
     output_file = get_output_path(output_file)
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    output_basename = os.path.basename(output_file)
+    # Command was built with relative filename; replace redirects with absolute path
+    command = command.replace(f">> {output_basename}", f">> {output_file}")
+
+    # Ensure directory exists and create output file so task_logs can read it immediately
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    header = (
+        f"=== Task started at {datetime.datetime.now().isoformat()} ===\n"
+        f"Command: {command}\n"
+        f"---\n"
+    )
+    with open(output_file, "w") as f:
+        f.write(header)
 
     process = await asyncio.create_subprocess_shell(
-        f"{command} > {output_file} 2>&1",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        f"{command} >> {output_file} 2>&1",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
     )
     
     BACKGROUND_TASKS[task_id] = {
@@ -184,63 +230,76 @@ async def monitor_task(task_id: str):
 async def task_list() -> list:
     """List all background tasks."""
     if not BACKGROUND_TASKS:
-        return [types.TextContent(type="text", text="📋 No background tasks found.")]
-    
-    output = "📋 **Background Tasks:**\n\n"
+        return _json_response("task_list", True, "No background tasks found.", data={"tasks": []})
+    tasks = []
     for tid, info in BACKGROUND_TASKS.items():
-        status_emoji = "🟢" if info["status"] == "running" else "✅" if info["status"] == "completed" else "❌"
-        output += f"### {tid} {status_emoji} {info['status'].upper()}\n"
-        output += f"**Command:** `{info['command']}`\n"
-        output += f"**Started:** {info['startTime']}\n"
-        if "endTime" in info:
-            output += f"**Ended:** {info['endTime']}\n"
-        output += f"**Output:** `{info['outputFile']}`\n\n"
-    
-    return [types.TextContent(type="text", text=output)]
+        tasks.append({
+            "task_id": tid,
+            "status": info["status"],
+            "command": info["command"],
+            "start_time": info["startTime"],
+            "end_time": info.get("endTime"),
+            "output_file": info["outputFile"],
+        })
+    return _json_response("task_list", True, f"Found {len(tasks)} task(s).", data={"tasks": tasks})
 
 async def task_stop(task_id: str) -> list:
     """Stop a running background task."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
-        return [types.TextContent(type="text", text=f"❌ Task '{task_id}' not found.")]
-    
+        return _json_response("task_stop", False, error=f"Task '{task_id}' not found.")
     if task["status"] != "running":
-        return [types.TextContent(type="text", text=f"⚠️ Task '{task_id}' is already {task['status']}.")]
-    
+        return _json_response("task_stop", False, error=f"Task '{task_id}' is already {task['status']}.")
     try:
         task["process"].terminate()
         task["status"] = "stopped"
         task["endTime"] = datetime.datetime.now().isoformat()
-        return [types.TextContent(type="text", text=f"✅ Task '{task_id}' has been stopped.")]
+        return _json_response("task_stop", True, f"Task '{task_id}' stopped.", data={"task_id": task_id})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error stopping task '{task_id}': {str(e)}")]
+        return _json_response("task_stop", False, error=str(e))
 
 async def task_logs(task_id: str, lines: int = 20) -> list:
     """Get the tail of logs for a background task."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
-        return [types.TextContent(type="text", text=f"❌ Task '{task_id}' not found.")]
-    
+        return _json_response("task_logs", False, error=f"Task '{task_id}' not found.")
     output_file = task["outputFile"]
     if not os.path.exists(output_file):
-        return [types.TextContent(type="text", text=f"⚠️ Output file '{output_file}' not found yet.")]
-    
+        return _json_response("task_logs", False, message="Output file not found yet.", data={"task_id": task_id, "output_file": output_file})
     try:
         with open(output_file, 'r') as f:
-            # Simple tail implementation
             log_lines = f.readlines()
             tail = "".join(log_lines[-lines:])
-            
-        status_emoji = "🟢" if task["status"] == "running" else "✅" if task["status"] == "completed" else "❌"
-        output = f"📄 **Logs for {task_id}** {status_emoji} ({task['status']})\n"
-        output += f"**File:** `{output_file}`\n"
-        output += f"**Showing last {lines} lines:**\n\n```\n{tail}\n```"
-        return [types.TextContent(type="text", text=output)]
+        data = {
+            "task_id": task_id,
+            "status": task["status"],
+            "output_file": output_file,
+            "lines_shown": lines,
+            "content": tail,
+        }
+        if task.get("status") == "failed" and "exitCode" in task:
+            data["exit_code"] = task["exitCode"]
+        return _json_response("task_logs", True, f"Logs for {task_id}.", data=data)
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error reading logs for task '{task_id}': {str(e)}")]
+        return _json_response("task_logs", False, error=str(e))
 
 def ensure_sessions_dir():
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    """Ensure sessions directory exists with proper permissions."""
+    global SESSIONS_DIR, ACTIVE_SESSION_FILE
+    try:
+        os.makedirs(SESSIONS_DIR, exist_ok=True)
+    except (OSError, PermissionError) as e:
+        # If /app/sessions fails, try cwd/sessions as fallback (for local dev)
+        if SESSIONS_DIR == "/app/sessions":
+            fallback_dir = os.path.join(os.getcwd(), "sessions")
+            try:
+                os.makedirs(fallback_dir, exist_ok=True)
+                SESSIONS_DIR = fallback_dir
+                ACTIVE_SESSION_FILE = os.path.join(SESSIONS_DIR, "active_session.txt")
+            except Exception:
+                raise RuntimeError(f"Cannot create sessions directory (tried {SESSIONS_DIR} and {fallback_dir}): {e}")
+        else:
+            raise RuntimeError(f"Cannot create sessions directory {SESSIONS_DIR}: {e}")
 
 
 def get_session_path(session_name):
@@ -302,11 +361,11 @@ async def session_create(session_name: str, description: str = "", target: str =
     """
     try:
         metadata = create_session(session_name, description, target)
-        return [types.TextContent(type="text", text=f"✅ Session '{session_name}' created and set as active.\n\nDescription: {description}\nTarget: {target}\nCreated: {metadata['created']}")]
+        return _json_response("session_create", True, f"Session '{session_name}' created and set as active.", data=metadata)
     except ValueError as e:
-        return [types.TextContent(type="text", text=f"❌ {str(e)}")]
+        return _json_response("session_create", False, error=str(e))
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error creating session: {str(e)}")]
+        return _json_response("session_create", False, error=str(e))
 
 
 async def session_list() -> list:
@@ -318,37 +377,26 @@ async def session_list() -> list:
     try:
         sessions = list_sessions()
         active_session = load_active_session()
-        
         if not sessions:
-            return [types.TextContent(type="text", text="📋 No sessions found. Use /session_create to create a new session.")]
-        
-        output = "📋 Available Sessions:\n\n"
-        
-        for session_name in sessions:
+            return _json_response("session_list", True, "No sessions found.", data={"sessions": [], "active_session": None})
+        list_data = []
+        for sn in sessions:
             try:
-                with open(get_session_metadata_path(session_name), 'r') as f:
-                    metadata = json.load(f)
-                
-                status = "🟢 ACTIVE" if session_name == active_session else "⚪ INACTIVE"
-                output += f"## {session_name} {status}\n"
-                output += f"**Description:** {metadata.get('description', 'No description')}\n"
-                output += f"**Target:** {metadata.get('target', 'No target')}\n"
-                output += f"**Created:** {metadata.get('created', 'Unknown')}\n"
-                output += f"**History Items:** {len(metadata.get('history', []))}\n\n"
-                
+                with open(get_session_metadata_path(sn), 'r') as f:
+                    meta = json.load(f)
+                list_data.append({
+                    "session_name": sn,
+                    "active": sn == active_session,
+                    "description": meta.get("description", ""),
+                    "target": meta.get("target", ""),
+                    "created": meta.get("created", ""),
+                    "history_count": len(meta.get("history", [])),
+                })
             except Exception as e:
-                output += f"## {session_name} ⚠️ ERROR\n"
-                output += f"Could not load metadata: {str(e)}\n\n"
-        
-        if active_session:
-            output += f"🟢 **Active Session:** {active_session}"
-        else:
-            output += "⚠️ **No active session**"
-        
-        return [types.TextContent(type="text", text=output)]
-        
+                list_data.append({"session_name": sn, "active": sn == active_session, "error": str(e)})
+        return _json_response("session_list", True, f"Found {len(list_data)} session(s).", data={"sessions": list_data, "active_session": active_session})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error listing sessions: {str(e)}")]
+        return _json_response("session_list", False, error=str(e))
 
 
 async def session_switch(session_name: str) -> list:
@@ -362,27 +410,16 @@ async def session_switch(session_name: str) -> list:
     try:
         sessions = list_sessions()
         if session_name not in sessions:
-            return [types.TextContent(type="text", text=f"❌ Session '{session_name}' not found. Available sessions: {', '.join(sessions)}")]
-        
+            return _json_response("session_switch", False, error=f"Session '{session_name}' not found.")
         save_active_session(session_name)
-        
-        # Load session metadata for confirmation
         try:
             with open(get_session_metadata_path(session_name), 'r') as f:
                 metadata = json.load(f)
-            
-            return [types.TextContent(type="text", text=
-                f"✅ Switched to session '{session_name}'\n\n"
-                f"**Description:** {metadata.get('description', 'No description')}\n"
-                f"**Target:** {metadata.get('target', 'No target')}\n"
-                f"**Created:** {metadata.get('created', 'Unknown')}\n"
-                f"**History Items:** {len(metadata.get('history', []))}"
-            )]
+            return _json_response("session_switch", True, f"Switched to session '{session_name}'.", data=metadata)
         except Exception as e:
-            return [types.TextContent(type="text", text=f"✅ Switched to session '{session_name}' (metadata could not be loaded: {str(e)})")]
-            
+            return _json_response("session_switch", True, f"Switched to '{session_name}' (metadata load failed).", data={"error": str(e)})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error switching sessions: {str(e)}")]
+        return _json_response("session_switch", False, error=str(e))
 
 
 async def session_status() -> list:
@@ -393,44 +430,28 @@ async def session_status() -> list:
     """
     try:
         active_session = load_active_session()
-        
         if not active_session:
-            return [types.TextContent(type="text", text="⚠️ No active session. Use /session_create to create a new session or /session_switch to switch to an existing one.")]
-        
-        # Load session metadata
+            return _json_response("session_status", False, message="No active session.", data={})
         try:
             with open(get_session_metadata_path(active_session), 'r') as f:
                 metadata = json.load(f)
-            
-            # Count files in session directory
             session_dir = get_session_path(active_session)
-            file_count = 0
-            if os.path.exists(session_dir):
-                file_count = len([f for f in os.listdir(session_dir) if os.path.isfile(os.path.join(session_dir, f)) and f != "metadata.json"])
-            
-            output = f"🟢 **Active Session:** {active_session}\n\n"
-            output += f"**Description:** {metadata.get('description', 'No description')}\n"
-            output += f"**Target:** {metadata.get('target', 'No target')}\n"
-            output += f"**Created:** {metadata.get('created', 'Unknown')}\n"
-            output += f"**History Items:** {len(metadata.get('history', []))}\n"
-            output += f"**Session Files:** {file_count}\n\n"
-            
-            # Show recent history (last 5 items)
-            history = metadata.get('history', [])
-            if history:
-                output += "**Recent Activity:**\n"
-                for item in history[-5:]:
-                    output += f"- {item.get('timestamp', 'Unknown')}: {item.get('action', 'Unknown action')}\n"
-            else:
-                output += "**Recent Activity:** No activity recorded yet."
-            
-            return [types.TextContent(type="text", text=output)]
-            
+            file_count = len([f for f in os.listdir(session_dir) if os.path.isfile(os.path.join(session_dir, f)) and f != "metadata.json"]) if os.path.exists(session_dir) else 0
+            history = metadata.get("history", [])
+            data = {
+                "active_session": active_session,
+                "description": metadata.get("description", ""),
+                "target": metadata.get("target", ""),
+                "created": metadata.get("created", ""),
+                "history_count": len(history),
+                "session_file_count": file_count,
+                "recent_activity": [{"timestamp": h.get("timestamp"), "action": h.get("action"), "details": h.get("details")} for h in history[-5:]],
+            }
+            return _json_response("session_status", True, f"Active session: {active_session}.", data=data)
         except Exception as e:
-            return [types.TextContent(type="text", text=f"⚠️ Active session '{active_session}' found, but metadata could not be loaded: {str(e)}")]
-            
+            return _json_response("session_status", False, message=f"Metadata could not be loaded: {e}", data={"active_session": active_session})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error getting session status: {str(e)}")]
+        return _json_response("session_status", False, error=str(e))
 
 
 async def session_delete(session_name: str) -> list:
@@ -444,47 +465,21 @@ async def session_delete(session_name: str) -> list:
     try:
         sessions = list_sessions()
         if session_name not in sessions:
-            return [types.TextContent(type="text", text=f"❌ Session '{session_name}' not found. Available sessions: {', '.join(sessions)}")]
-        
+            return _json_response("session_delete", False, error=f"Session '{session_name}' not found.")
         active_session = load_active_session()
-        
-        # Check if trying to delete active session
         if session_name == active_session:
-            return [types.TextContent(type="text", text=f"❌ Cannot delete active session '{session_name}'. Switch to another session first using /session_switch.")]
-        
-        # Load metadata before deletion for confirmation
+            return _json_response("session_delete", False, error="Cannot delete active session. Switch first.")
         try:
             with open(get_session_metadata_path(session_name), 'r') as f:
                 metadata = json.load(f)
-            
-            description = metadata.get('description', 'No description')
-            target = metadata.get('target', 'No target')
-            created = metadata.get('created', 'Unknown')
-            history_count = len(metadata.get('history', []))
-            
+            deleted_info = {"description": metadata.get("description"), "target": metadata.get("target"), "created": metadata.get("created"), "history_count": len(metadata.get("history", []))}
         except Exception:
-            description = "Unknown"
-            target = "Unknown"
-            created = "Unknown"
-            history_count = 0
-        
-        # Delete session directory and all contents
-        session_dir = get_session_path(session_name)
+            deleted_info = {}
         import shutil
-        shutil.rmtree(session_dir)
-        
-        return [types.TextContent(type="text", text=
-            f"✅ Session '{session_name}' deleted successfully.\n\n"
-            f"**Deleted Session Details:**\n"
-            f"- Description: {description}\n"
-            f"- Target: {target}\n"
-            f"- Created: {created}\n"
-            f"- History Items: {history_count}\n"
-            f"- All session files and evidence have been removed."
-        )]
-        
+        shutil.rmtree(get_session_path(session_name))
+        return _json_response("session_delete", True, f"Session '{session_name}' deleted.", data={"deleted_session": session_name, "details": deleted_info})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error deleting session: {str(e)}")]
+        return _json_response("session_delete", False, error=str(e))
 
 
 async def session_history() -> list:
@@ -495,42 +490,18 @@ async def session_history() -> list:
     """
     try:
         active_session = load_active_session()
-        
         if not active_session:
-            return [types.TextContent(type="text", text="⚠️ No active session. Use /session_create to create a new session or /session_switch to switch to an existing one.")]
-        
-        # Load session metadata
+            return _json_response("session_history", False, message="No active session.", data={"history": []})
         try:
             with open(get_session_metadata_path(active_session), 'r') as f:
                 metadata = json.load(f)
-            
-            history = metadata.get('history', [])
-            
-            if not history:
-                return [types.TextContent(type="text", text=f"📜 No history recorded for session '{active_session}' yet.")]
-            
-            output = f"📜 **Session History for '{active_session}'**\n\n"
-            output += f"**Total Items:** {len(history)}\n\n"
-            
-            # Show all history items in reverse chronological order
-            for i, item in enumerate(reversed(history), 1):
-                timestamp = item.get('timestamp', 'Unknown')
-                action = item.get('action', 'Unknown action')
-                details = item.get('details', '')
-                
-                output += f"**{len(history) - i + 1}.** {timestamp}\n"
-                output += f"   **Action:** {action}\n"
-                if details:
-                    output += f"   **Details:** {details}\n"
-                output += "\n"
-            
-            return [types.TextContent(type="text", text=output)]
-            
+            history = metadata.get("history", [])
+            items = [{"timestamp": h.get("timestamp"), "action": h.get("action"), "details": h.get("details")} for h in reversed(history)]
+            return _json_response("session_history", True, f"History for '{active_session}' ({len(items)} items).", data={"session": active_session, "history": items})
         except Exception as e:
-            return [types.TextContent(type="text", text=f"⚠️ Could not load history for session '{active_session}': {str(e)}")]
-            
+            return _json_response("session_history", False, message=str(e), data={"session": active_session})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error getting session history: {str(e)}")]
+        return _json_response("session_history", False, error=str(e))
 
 
 async def fetch_website(url: str) -> Sequence[Union[types.TextContent, types.ImageContent, types.EmbeddedResource]]:
@@ -565,13 +536,13 @@ async def fetch_website(url: str) -> Sequence[Union[types.TextContent, types.Ima
         try:
             response = await client.get(url)
             response.raise_for_status()
-            return [types.TextContent(type="text", text=response.text)]
+            return _json_response("fetch", True, "Content fetched.", data={"url": url, "status_code": response.status_code, "content": response.text})
         except httpx.TimeoutException:
-            return [types.TextContent(type="text", text="Request timed out after 30 seconds")]
+            return _json_response("fetch", False, error="Request timed out after 30 seconds")
         except httpx.HTTPStatusError as e:
-            return [types.TextContent(type="text", text=f"HTTP error: {e.response.status_code} - {e.response.reason_phrase}")]
+            return _json_response("fetch", False, error=f"HTTP {e.response.status_code} - {e.response.reason_phrase}")
         except httpx.RequestError as e:
-            return [types.TextContent(type="text", text=f"Request error: {str(e)}")]
+            return _json_response("fetch", False, error=str(e))
 
 
 def is_command_allowed(command: str) -> tuple[bool, bool]:
@@ -618,20 +589,10 @@ async def run_command(command: str) -> Sequence[types.TextContent]:
         is_allowed, is_long_running = is_command_allowed(command)
         
         if not is_allowed:
-            return [types.TextContent(type="text", text=
-                f"Command '{command}' is not allowed for security reasons. "
-                f"Please use one of the permitted commands or tools."
-            )]
-        
-        # For long-running commands, run them in the background
+            return _json_response("run", False, error="Command not allowed for security reasons.")
         if is_long_running:
             task_id = await register_background_task(command, "command_output.txt")
-            return [types.TextContent(type="text", text=
-                f"🚀 Started long-running command: `{command}`\n"
-                f"🆔 Task ID: `{task_id}`\n"
-                f"⏱️  Monitor progress with: `task_logs task_id={task_id}`\n"
-                f"📋 List all tasks with: `task_list`"
-            )]
+            return _json_response("run", True, "Long-running command started.", data={"task_id": task_id, "command": command})
         
         # For regular commands, use a timeout approach
         process = await asyncio.create_subprocess_shell(
@@ -645,21 +606,13 @@ async def run_command(command: str) -> Sequence[types.TextContent]:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60.0)
             
             output = stdout.decode() if stdout else ""
-            error = stderr.decode() if stderr else ""
-            
-            if error:
-                output += f"\nErrors:\n{error}"
-                
-            return [types.TextContent(type="text", text=output or "Command executed successfully (no output)")]
+            err = stderr.decode() if stderr else ""
+            return _json_response("run", True, "Command executed.", data={"command": command, "stdout": output, "stderr": err})
         except asyncio.TimeoutError:
-            # Kill process if it's taking too long
             process.kill()
-            return [types.TextContent(type="text", text=
-                "Command timed out after 60 seconds. For long-running commands, "
-                "try adding '> output.txt &' to run in background."
-            )]
+            return _json_response("run", False, error="Command timed out after 60 seconds.")
     except Exception as e:
-        return [types.TextContent(type="text", text=f"Error executing command: {str(e)}")]
+        return _json_response("run", False, error=str(e))
 
 
 async def list_system_resources() -> Sequence[types.TextContent]:
@@ -765,24 +718,7 @@ async def list_system_resources() -> Sequence[types.TextContent]:
         }
     }
     
-    # Format output with Markdown
-    output = "# System Resources\n\n## System Information\n"
-    output += json.dumps(system_info, indent=2) + "\n\n"
-    
-    # Add each category
-    for category, data in resources.items():
-        output += f"## {category.replace('_', ' ').title()}\n"
-        output += f"{data['description']}\n\n"
-        
-        # Add commands in category
-        output += "| Command | Description |\n"
-        output += "|---------|-------------|\n"
-        for cmd, desc in data["commands"].items():
-            output += f"| `{cmd}` | {desc} |\n"
-        
-        output += "\n"
-    
-    return [types.TextContent(type="text", text=output)]
+    return _json_response("resources", True, "System resources and command examples.", data={"system_info": system_info, "resources": resources})
 
 
 async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -830,13 +766,7 @@ async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> S
     full_cmd = " && ".join(scan_commands)
     task_id = await register_background_task(full_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🚀 Started {scan_type} vulnerability scan on {target}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📋 Tasks: {len(scan_commands)} commands queued\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("vulnerability_scan", True, f"Started {scan_type} vulnerability scan on {target}.", data={"task_id": task_id, "output_file": output_file, "commands_queued": len(scan_commands)})
 
 
 async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequence[types.TextContent]:
@@ -883,12 +813,7 @@ async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequen
     full_cmd = " && ".join(enum_commands)
     task_id = await register_background_task(full_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🌐 Started {enumeration_type} web enumeration on {target}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("web_enumeration", True, f"Started {enumeration_type} web enumeration on {target}.", data={"task_id": task_id, "output_file": output_file})
 
 
 async def network_discovery(target: str, discovery_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -931,80 +856,127 @@ async def network_discovery(target: str, discovery_type: str = "comprehensive") 
     full_cmd = " && ".join(discovery_commands)
     task_id = await register_background_task(full_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🔍 Started {discovery_type} network discovery on {target}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("network_discovery", True, f"Started {discovery_type} network discovery on {target}.", data={"task_id": task_id, "output_file": output_file})
+
+
+# Exploit-DB website search URL (DataTables server-side API returns JSON with X-Requested-With header)
+EXPLOIT_DB_SEARCH_URL = "https://www.exploit-db.com/search"
 
 
 async def exploit_search(search_term: str, search_type: str = "all") -> Sequence[types.TextContent]:
     """
-    Search for exploits using searchsploit and other exploit databases.
+    Search for exploits on https://www.exploit-db.com (Exploit Database website).
+    
+    Uses the site's search API directly instead of the searchsploit CLI.
     
     Args:
         search_term: Term to search for (e.g., "apache", "ssh", "CVE-2021-44228")
-        search_type: Type of search (all, web, remote, local, dos)
+        search_type: Type of search (all, web, remote, local, dos). Maps to Exploit-DB type filter.
         
     Returns:
-        List containing TextContent with search results
+        List containing TextContent with search results (JSON)
     """
-    timestamp = int(asyncio.get_event_loop().time())
-    output_file = get_output_path(f"exploit_search_{search_term.replace(' ', '_')}_{timestamp}.txt")
-    
-    search_commands = []
-    
-    if search_type == "all":
-        search_commands = [
-            f"searchsploit {search_term}",
-            f"searchsploit {search_term} --exclude=/dos/"
-        ]
-    elif search_type == "web":
-        search_commands = [
-            f"searchsploit {search_term} web",
-            f"searchsploit {search_term} --type web"
-        ]
+    # Map tool search_type to Exploit-DB type query param (empty = all)
+    type_param = ""
+    if search_type == "web":
+        type_param = "webapps"
     elif search_type == "remote":
-        search_commands = [
-            f"searchsploit {search_term} remote",
-            f"searchsploit {search_term} --type remote"
-        ]
+        type_param = "remote"
     elif search_type == "local":
-        search_commands = [
-            f"searchsploit {search_term} local",
-            f"searchsploit {search_term} --type local"
-        ]
+        type_param = "local"
     elif search_type == "dos":
-        search_commands = [
-            f"searchsploit {search_term} dos",
-            f"searchsploit {search_term} --type dos"
-        ]
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        type_param = "dos"
 
-    # Execute search commands
-    for cmd in search_commands:
-        process = await asyncio.create_subprocess_shell(
-            f"{cmd} >> {output_file} 2>&1",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await process.communicate()
-    
-    # Read results
+    params = {
+        "q": search_term,
+        "draw": "1",
+        "start": "0",
+        "length": "50",
+    }
+    if type_param:
+        params["type"] = type_param
+
+    results_list = []
+    total = 0
+    error_msg = None
+    data: dict = {}
+
     try:
-        with open(output_file, 'r') as f:
-            results = f.read()
-    except FileNotFoundError:
-        results = "No results found or file not created."
-    
-    return [types.TextContent(type="text", text=
-        f"🔍 Exploit search results for '{search_term}' ({search_type}):\n\n"
-        f"📁 Results saved to: {output_file}\n\n"
-        f"🔎 Search results:\n{results}"
-    )]
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(30.0),
+            headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json",
+            },
+        ) as client:
+            response = await client.get(EXPLOIT_DB_SEARCH_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+    except httpx.TimeoutException:
+        error_msg = "Request to Exploit-DB timed out."
+    except httpx.HTTPStatusError as e:
+        error_msg = f"Exploit-DB returned HTTP {e.response.status_code}."
+    except httpx.RequestError as e:
+        error_msg = f"Request failed: {e!s}"
+    except (KeyError, json.JSONDecodeError) as e:
+        error_msg = f"Invalid response from Exploit-DB: {e!s}"
+
+    if error_msg:
+        return _json_response(
+            "exploit_search",
+            False,
+            f"Exploit search for '{search_term}' failed.",
+            error=error_msg,
+            data={
+                "search_url": f"{EXPLOIT_DB_SEARCH_URL}?q={search_term}",
+                "results": [],
+            },
+        )
+
+    total = data.get("recordsFiltered", data.get("recordsTotal", 0))
+    raw_rows = data.get("data") or []
+
+    for row in raw_rows:
+        desc = row.get("description")
+        if isinstance(desc, list) and len(desc) >= 2:
+            edb_id, title = desc[0], desc[1]
+        else:
+            edb_id, title = str(row.get("id", "")), str(row.get("description", ""))
+        author = row.get("author_id")
+        if isinstance(author, list) and len(author) >= 2:
+            author = author[1]
+        else:
+            author = str(author or "")
+        cves = []
+        for code in row.get("code") or []:
+            if isinstance(code, dict) and code.get("code_type") == "cve":
+                cves.append(code.get("code", ""))
+        results_list.append({
+            "id": edb_id,
+            "title": title,
+            "type": row.get("type_id", ""),
+            "platform": row.get("platform_id", ""),
+            "author": author,
+            "date": row.get("date_published", ""),
+            "cve": ", ".join(cves) if cves else "",
+            "url": f"https://www.exploit-db.com/exploits/{edb_id}",
+        })
+
+    search_url_with_q = f"{EXPLOIT_DB_SEARCH_URL}?q={search_term}"
+    if type_param:
+        search_url_with_q += f"&type={type_param}"
+
+    return _json_response(
+        "exploit_search",
+        True,
+        f"Exploit search for '{search_term}' ({search_type}): {total} result(s) from Exploit-DB.",
+        data={
+            "search_url": search_url_with_q,
+            "total": total,
+            "results": results_list,
+        },
+    )
 
 
 async def save_output(content: str, filename: Optional[str] = None, category: str = "general") -> Sequence[types.TextContent]:
@@ -1041,15 +1013,9 @@ async def save_output(content: str, filename: Optional[str] = None, category: st
             f.write("-" * 50 + "\n\n")
             f.write(content)
         
-        return [types.TextContent(type="text", text=
-            f"✅ Content saved successfully!\n\n"
-            f"📁 File: {output_file}\n"
-            f"📊 Size: {len(content)} characters\n"
-            f"🕒 Timestamp: {datetime.datetime.now().isoformat()}\n\n"
-            f"📝 Preview (first 200 chars):\n{content[:200]}{'...' if len(content) > 200 else ''}"
-        )]
+        return _json_response("save_output", True, "Content saved successfully.", data={"output_file": output_file, "size_chars": len(content), "preview": content[:200] + ("..." if len(content) > 200 else "")})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error saving file: {str(e)}")]
+        return _json_response("save_output", False, error=str(e))
 
 
 async def create_report(title: str, findings: str, report_type: str = "markdown") -> Sequence[types.TextContent]:
@@ -1133,21 +1099,12 @@ Generated on {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
             }
             report_content = json.dumps(report_data, indent=2)
         else:
-            return [types.TextContent(type="text", text=f"❌ Unsupported report type: {report_type}")]
-        
-        # Save report to file
+            return _json_response("create_report", False, error=f"Unsupported report type: {report_type}")
         with open(report_file, 'w') as f:
             f.write(report_content)
-        
-        return [types.TextContent(type="text", text=
-            f"📋 Report generated successfully!\n\n"
-            f"📁 File: {report_file}\n"
-            f"📊 Size: {len(report_content)} characters\n"
-            f"🕒 Generated: {datetime.datetime.now().isoformat()}\n\n"
-            f"📝 Report Preview:\n{report_content[:500]}{'...' if len(report_content) > 500 else ''}"
-        )]
+        return _json_response("create_report", True, "Report generated successfully.", data={"report_file": report_file, "size_chars": len(report_content), "report_type": report_type})
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error generating report: {str(e)}")]
+        return _json_response("create_report", False, error=str(e))
 
 
 async def file_analysis(filepath: str) -> Sequence[types.TextContent]:
@@ -1221,15 +1178,9 @@ async def file_analysis(filepath: str) -> Sequence[types.TextContent]:
         with open(analysis_file, 'w') as f:
             f.write(full_analysis)
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error saving analysis: {str(e)}")]
+        return _json_response("file_analysis", False, error=str(e))
     
-    return [types.TextContent(type="text", text=
-        f"🔍 File analysis completed!\n\n"
-        f"📁 Analysis saved to: {analysis_file}\n"
-        f"📊 Analysis size: {len(full_analysis)} characters\n"
-        f"🕒 Analyzed: {datetime.datetime.now().isoformat()}\n\n"
-        f"📝 Analysis Preview:\n{full_analysis[:500]}{'...' if len(full_analysis) > 500 else ''}"
-    )]
+    return _json_response("file_analysis", True, "File analysis completed.", data={"analysis_file": analysis_file, "size_chars": len(full_analysis), "preview": full_analysis[:500] + ("..." if len(full_analysis) > 500 else "")})
 
 
 async def download_file(url: str, filename: Optional[str] = None) -> Sequence[types.TextContent]:
@@ -1288,24 +1239,15 @@ async def download_file(url: str, filename: Optional[str] = None) -> Sequence[ty
             import hashlib
             file_hash = hashlib.sha256(response.content).hexdigest()
             
-            return [types.TextContent(type="text", text=
-                f"✅ File downloaded successfully!\n\n"
-                f"📁 Saved as: {download_path}\n"
-                f"📊 Size: {file_size} bytes\n"
-                f"🔗 URL: {url}\n"
-                f"📋 Content-Type: {content_type}\n"
-                f"🔐 SHA256: {file_hash}\n"
-                f"🕒 Downloaded: {datetime.datetime.now().isoformat()}\n\n"
-                f"💡 You can now analyze this file using the file_analysis tool."
-            )]
+            return _json_response("download_file", True, "File downloaded successfully.", data={"path": download_path, "size_bytes": file_size, "url": url, "content_type": content_type, "sha256": file_hash})
     except httpx.TimeoutException:
-        return [types.TextContent(type="text", text="❌ Download timed out after 60 seconds")]
+        return _json_response("download_file", False, error="Download timed out after 60 seconds")
     except httpx.HTTPStatusError as e:
-        return [types.TextContent(type="text", text=f"❌ HTTP error: {e.response.status_code} - {e.response.reason_phrase}")]
+        return _json_response("download_file", False, error=f"HTTP {e.response.status_code} - {e.response.reason_phrase}")
     except httpx.RequestError as e:
-        return [types.TextContent(type="text", text=f"❌ Request error: {str(e)}")]
+        return _json_response("download_file", False, error=str(e))
     except Exception as e:
-        return [types.TextContent(type="text", text=f"❌ Error downloading file: {str(e)}")]
+        return _json_response("download_file", False, error=str(e))
 
 
 async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[types.TextContent]:
@@ -1328,14 +1270,7 @@ async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[t
     
     task_id = await register_background_task(msf_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🛡️ Metasploit module execution started!\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📦 Module: `{module}`\n"
-        f"🎯 Target: `{rhosts}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("msf_exploit", True, "Metasploit module execution started.", data={"task_id": task_id, "module": module, "rhosts": rhosts, "output_file": output_file})
 
 
 async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Sequence[types.TextContent]:
@@ -1353,19 +1288,11 @@ async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Se
     timestamp = int(asyncio.get_event_loop().time())
     output_file = get_output_path(f"nmap_nse_{target.replace('.', '_')}_{timestamp}.txt")
     
-    # Construct nmap command
     nmap_cmd = f"nmap -sV -p{ports} --script {scripts} {target}"
     
     task_id = await register_background_task(nmap_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🔍 Nmap NSE script scan started!\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📜 Scripts: `{scripts}`\n"
-        f"🎯 Target: `{target}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("nmap_nse_scan", True, "Nmap NSE script scan started.", data={"task_id": task_id, "scripts": scripts, "target": target, "ports": ports, "output_file": output_file})
 
 
 async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequence[types.TextContent]:
@@ -1392,13 +1319,7 @@ async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequenc
     spider_cmd = f"gospider -s {url} -d {depth} -c {threads}"
     task_id = await register_background_task(spider_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🕷️ Started website spidering on {url}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📊 Depth: {depth} | Threads: {threads}\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("spider_website", True, f"Started website spidering on {url}.", data={"task_id": task_id, "url": url, "depth": depth, "threads": threads, "output_file": get_output_path(output_file)})
 
 
 async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1430,13 +1351,7 @@ async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[
     
     task_id = await register_background_task(form_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"📝 Started web form analysis on {url}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"🔍 Scan Type: {scan_type}\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("form_analysis", True, f"Started web form analysis on {url}.", data={"task_id": task_id, "url": url, "scan_type": scan_type, "output_file": get_output_path(output_file)})
 
 
 async def header_analysis(url: str, include_security: bool = True) -> Sequence[types.TextContent]:
@@ -1461,12 +1376,7 @@ async def header_analysis(url: str, include_security: bool = True) -> Sequence[t
     header_cmd = f"curl -s -I {url}"
     task_id = await register_background_task(header_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"📋 Started HTTP header analysis on {url}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("header_analysis", True, f"Started HTTP header analysis on {url}.", data={"task_id": task_id, "url": url, "output_file": get_output_path(output_file)})
 
 
 async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]:
@@ -1491,12 +1401,7 @@ async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]
     ssl_cmd = f"testssl.sh --quiet --color 0 {domain}:{port}"
     task_id = await register_background_task(ssl_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🔐 Started SSL/TLS analysis on {domain}:{port}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("ssl_analysis", True, f"Started SSL/TLS analysis on {domain}:{port}.", data={"task_id": task_id, "domain": domain, "port": port, "output_file": get_output_path(output_file)})
 
 
 async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1540,12 +1445,7 @@ async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence
     full_cmd = " && ".join(enum_commands)
     task_id = await register_background_task(full_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🔍 Started {enum_type} subdomain enumeration on {domain}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("subdomain_enum", True, f"Started {enum_type} subdomain enumeration on {domain}.", data={"task_id": task_id, "domain": domain, "enum_type": enum_type, "output_file": get_output_path(output_file)})
 
 
 async def web_audit(url: str, audit_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1595,12 +1495,7 @@ async def web_audit(url: str, audit_type: str = "comprehensive") -> Sequence[typ
     full_cmd = " && ".join(audit_commands)
     task_id = await register_background_task(full_cmd, output_file)
     
-    return [types.TextContent(type="text", text=
-        f"🔍 Started comprehensive {audit_type} web audit on {url}\n\n"
-        f"🆔 Task ID: `{task_id}`\n"
-        f"📁 Output: `{output_file}`\n\n"
-        f"⏱️  Monitor: `task_logs task_id={task_id}`"
-    )]
+    return _json_response("web_audit", True, f"Started {audit_type} web audit on {url}.", data={"task_id": task_id, "url": url, "audit_type": audit_type, "output_file": get_output_path(output_file)})
 
 OUTPUT_FILE_PATTERNS = [
     # Core tool outputs

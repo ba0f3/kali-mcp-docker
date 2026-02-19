@@ -1,0 +1,27 @@
+# Git and IDE
+.git
+.gitignore
+.cursor
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+dist
+build
+
+# Tests and scripts (not needed in container at runtime)
+tests/
+scripts/
+
+# Docs and dev files
+*.md
+!README.md
+.env
+.env.*
+.dockerignore
+Dockerfile
+docker-compose*.yml

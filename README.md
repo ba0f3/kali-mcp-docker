@@ -16,7 +16,7 @@ This project provides a Docker containerized MCP server that runs on Kali Linux,
 - **🛡️ Command Validation**: Commands are validated against an allowlist for security
 - **🌐 Web Content Fetching**: Retrieve and analyze web content
 - **📊 Resource Information**: Comprehensive system resource details and command examples
-- **👤 Security Focus**: Running as non-root user with appropriate permissions
+- **👤 Security Focus**: Command validation and allowlist; container runs as root so nmap/ping etc. have required capabilities
 
 ### 🔧 Pre-installed Security Tools
 
@@ -396,7 +396,7 @@ This container provides access to powerful security tools. Please observe the fo
 - Use responsibly and only in controlled environments
 - The container is designed to be run locally and should not be exposed to the internet
 - Commands are validated against an allowlist for security
-- The server runs as a non-root user inside the container
+- The server runs as root inside the container so scanning tools (nmap, ping, traceroute) work with raw sockets
 - Only use this tool for legitimate security testing with proper authorization
 
 ## 📋 Requirements

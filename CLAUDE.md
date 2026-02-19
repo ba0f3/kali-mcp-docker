@@ -77,7 +77,7 @@ The Docker container is based on Kali Linux and includes a wide range of pre-ins
 - Web vulnerability scanning (nikto)
 - SQL injection testing (sqlmap)
 
-The container is configured to run as a non-root user for improved security.
+The container runs as root so that nmap and other tools can use raw sockets (e.g. SYN scan, OS detection).
 
 ## Integration with Claude Desktop
 
@@ -103,7 +103,7 @@ See CLAUDE_INTEGRATION.md for detailed integration instructions.
 This container provides access to powerful security tools. It includes several security measures:
 
 1. Commands are validated against an allowlist
-2. The server runs as a non-root user inside the container
+2. The server runs as root inside the container so scanning tools (nmap, ping, etc.) have required capabilities
 3. Long-running commands are executed with appropriate controls
 4. Input validation is applied to commands and URLs
 
