@@ -804,18 +804,18 @@ async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> S
     if scan_type == "quick":
         scan_commands = [
             f"nmap -F -sV {target} >> {output_file} 2>&1",
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1"
+            f"nikto -h {target} >> {output_file} 2>&1"
         ]
     elif scan_type == "comprehensive":
         scan_commands = [
             f"nmap -sS -sV -O -p- {target} >> {output_file} 2>&1",
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1",
+            f"nikto -h {target} >> {output_file} 2>&1",
             f"gobuster dir -u http://{target} -w /usr/share/wordlists/dirb/common.txt >> {output_file} 2>&1",
             f"whois {target} >> {output_file} 2>&1"
         ]
     elif scan_type == "web":
         scan_commands = [
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1",
+            f"nikto -h {target} >> {output_file} 2>&1",
             f"gobuster dir -u http://{target} -w /usr/share/wordlists/dirb/common.txt >> {output_file} 2>&1",
             f"sqlmap --url http://{target} --batch --random-agent --level 1 >> {output_file} 2>&1"
         ]
@@ -861,19 +861,19 @@ async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequen
     
     if enumeration_type == "basic":
         enum_commands = [
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1",
+            f"nikto -h {target} >> {output_file} 2>&1",
             f"gobuster dir -u {target} -w /usr/share/wordlists/dirb/common.txt >> {output_file} 2>&1"
         ]
     elif enumeration_type == "full":
         enum_commands = [
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1",
+            f"nikto -h {target} >> {output_file} 2>&1",
             f"gobuster dir -u {target} -w /usr/share/wordlists/dirb/common.txt >> {output_file} 2>&1",
             f"gobuster vhost -u {target} -w /usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-5000.txt >> {output_file} 2>&1",
             f"curl -I {target} >> {output_file} 2>&1"
         ]
     elif enumeration_type == "aggressive":
         enum_commands = [
-            f"nikto -h {target} -Format txt >> {output_file} 2>&1",
+            f"nikto -h {target} >> {output_file} 2>&1",
             f"gobuster dir -u {target} -w /usr/share/wordlists/dirb/common.txt >> {output_file} 2>&1",
             f"gobuster vhost -u {target} -w /usr/share/wordlists/SecLists/Discovery/DNS/subdomains-top1million-5000.txt >> {output_file} 2>&1",
             f"sqlmap --url {target} --batch --random-agent --level 2 >> {output_file} 2>&1",

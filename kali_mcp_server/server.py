@@ -5,6 +5,7 @@ This module provides the main server functionality for the Kali MCP Server,
 including tool registration, transport configuration, and server initialization.
 """
 
+import sys
 from typing import Any, Dict, List, Sequence, Union
 
 import anyio
@@ -880,7 +881,8 @@ def start_stdio_server(debug: bool) -> int:
 
     async def start_stdio_connection():
         """Initialize and run the stdio server."""
-        print("Starting Kali MCP Server with stdio transport")
+        # Stdio transport uses stdout for JSON-RPC; log to stderr only
+        print("Starting Kali MCP Server with stdio transport", file=sys.stderr)
         async with stdio_server() as streams:
             await kali_server.run(
                 streams[0], streams[1], kali_server.create_initialization_options()

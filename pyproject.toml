@@ -3,7 +3,8 @@ name = "kali-mcp-server"
 version = "0.1.0"
 description = "A Kali Linux MCP server providing AI assistants with access to security tools"
 readme = "README.md"
-requires-python = ">=3.10"
+# pydantic-core (via mcp) does not support Python 3.14 yet (PyO3 max 3.13)
+requires-python = ">=3.10,<3.14"
 authors = [{ name = "Anthropic, PBC." }]
 maintainers = [
     { name = "David Soria Parra", email = "davidsp@anthropic.com" },
