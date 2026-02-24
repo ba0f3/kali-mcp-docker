@@ -236,43 +236,62 @@ async def list_available_tools() -> List[types.Tool]:
     return [
         types.Tool(
             name="fetch",
-            description="Fetches a website and returns its content",
+            description="Fetch a URL and return response body. Use for quick page content. Returns: HTML/text. Sync.",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
                 "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL to fetch",
-                    }
+                    "url": {"type": "string", "description": "URL to fetch"},
                 },
             },
         ),
         types.Tool(
             name="run",
-            description="Runs a shell command on the Kali Linux system",
+            description="Execute a shell command in Kali. Long-running commands (nmap, nikto, etc.) run in background. Returns: sync=stdout/stderr; background=task_id. Next: use task_logs(task_id) for background output.",
             inputSchema={
                 "type": "object",
                 "required": ["command"],
                 "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute",
-                    }
+                    "command": {"type": "string", "description": "Shell command to execute"},
+                },
+            },
+        ),
+        types.Tool(
+            name="task_list",
+            description="List all background tasks. Returns: task_id, status, command, output_file per task. Next: call task_logs(task_id=<id>) to read output.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
+            name="task_logs",
+            description="Read last N lines of a task's output file. Use for scan/command results from this server. Do not use download_file for server files. Returns: task_id, status, lines_shown, then content. Pass task_id from task_list or from the tool that started the task.",
+            inputSchema={
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID (e.g. task_1234567890)"},
+                    "lines": {"type": "integer", "description": "Number of lines (default 20)", "default": 20},
+                },
+            },
+        ),
+        types.Tool(
+            name="task_stop",
+            description="Stop a running background task. Returns: ok/skipped/error. Next: task_list to confirm.",
+            inputSchema={
+                "type": "object",
+                "required": ["task_id"],
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task ID from task_list or start response"},
                 },
             },
         ),
         types.Tool(
             name="resources",
-            description="Lists available system resources and command examples",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
+            description="List system info and example commands. Use to discover allowed commands and workflows. Sync.",
+            inputSchema={"type": "object", "properties": {}},
         ),
         types.Tool(
             name="vulnerability_scan",
-            description="Perform automated vulnerability assessment with multiple tools",
+            description="Start vulnerability scan (runs in background). Returns: task_id, output_file. Next: task_logs(task_id) for results.",
             inputSchema={
                 "type": "object",
                 "required": ["target"],
@@ -292,7 +311,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="web_enumeration",
-            description="Perform comprehensive web application discovery and enumeration",
+            description="Start web enumeration (background). Returns: task_id, output_file. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["target"],
@@ -312,7 +331,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="network_discovery",
-            description="Perform multi-stage network reconnaissance and discovery",
+            description="Start network discovery/recon (background). Returns: task_id, output_file. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["target"],
@@ -332,7 +351,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="exploit_search",
-            description="Search for exploits using searchsploit and other exploit databases",
+            description="Search Exploit-DB (searchsploit). Returns matches. Sync. Use before msf_exploit to pick module.",
             inputSchema={
                 "type": "object",
                 "required": ["search_term"],
@@ -352,7 +371,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="save_output",
-            description="Save content to a timestamped file for evidence collection",
+            description="Save text to a timestamped file in session/outputs. Optional: filename, category.",
             inputSchema={
                 "type": "object",
                 "required": ["content"],
@@ -375,7 +394,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="create_report",
-            description="Generate a structured report from findings",
+            description="Generate report from title and findings. Types: markdown, text, json.",
             inputSchema={
                 "type": "object",
                 "required": ["title", "findings"],
@@ -399,7 +418,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="file_analysis",
-            description="Analyze a file using various tools (file type, strings, hash)",
+            description="Analyze file on server: type, strings, hash. Use path from download_file or task output.",
             inputSchema={
                 "type": "object",
                 "required": ["filepath"],
@@ -413,14 +432,14 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="download_file",
-            description="Download a file from a URL and save it locally",
+            description="Download a file from the internet (URL) into the container. For scan/log output on the server use task_logs(task_id) or run(cat path).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "URL to download from",
+                        "description": "External URL to download from (e.g. https://example.com/file.zip)",
                     },
                     "filename": {
                         "type": "string",
@@ -431,7 +450,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_create",
-            description="Create a new pentest session (name, description, target)",
+            description="Create a pentest session. Outputs and scans are stored per session. Optional: description, target.",
             inputSchema={
                 "type": "object",
                 "required": ["session_name"],
@@ -453,7 +472,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_list",
-            description="List all pentest sessions with metadata",
+            description="List sessions and metadata. Use session_switch(name) to change active session.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -461,7 +480,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_switch",
-            description="Switch to a different pentest session",
+            description="Set active session. New scan outputs go to this session's directory.",
             inputSchema={
                 "type": "object",
                 "required": ["session_name"],
@@ -475,7 +494,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_status",
-            description="Show current session status and summary",
+            description="Show current session name, path, and summary.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -483,7 +502,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_delete",
-            description="Delete a pentest session and all its evidence",
+            description="Delete a session and its stored data. Requires session_name.",
             inputSchema={
                 "type": "object",
                 "required": ["session_name"],
@@ -497,7 +516,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="session_history",
-            description="Show command/evidence history for the current session",
+            description="Show action history for the current session.",
             inputSchema={
                 "type": "object",
                 "properties": {},
@@ -505,7 +524,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="spider_website",
-            description="Spider a website to find all links and resources",
+            description="Start website spider/crawl (background). Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -529,7 +548,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="form_analysis",
-            description="Analyze a web form for vulnerabilities",
+            description="Start form discovery/analysis (background). Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -549,7 +568,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="header_analysis",
-            description="Analyze HTTP headers for security issues",
+            description="Fetch and analyze HTTP headers (background). Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -568,7 +587,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="ssl_analysis",
-            description="Analyze SSL/TLS configuration of a website",
+            description="Start SSL/TLS assessment (background). Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -587,7 +606,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="subdomain_enum",
-            description="Enumerate subdomains of a target website",
+            description="Start subdomain enumeration (background). Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -607,7 +626,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="web_audit",
-            description="Perform a comprehensive web application audit",
+            description="Start web app audit (nikto, gobuster, etc.) in background. Returns: task_id. Next: task_logs(task_id).",
             inputSchema={
                 "type": "object",
                 "required": ["url"],
@@ -627,7 +646,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="msf_exploit",
-            description="Execute a Metasploit module against a target",
+            description="Run Metasploit module (background). Returns: task_id. Next: task_logs(task_id). Options: module path, rhosts, optional options string.",
             inputSchema={
                 "type": "object",
                 "required": ["module", "rhosts"],
@@ -649,7 +668,7 @@ async def list_available_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="nmap_nse_scan",
-            description="Perform targeted Nmap NSE script scan",
+            description="Run Nmap with NSE scripts (background). Returns: task_id. Next: task_logs(task_id). Scripts e.g. vuln, http-enum.",
             inputSchema={
                 "type": "object",
                 "required": ["target", "scripts"],
@@ -666,47 +685,6 @@ async def list_available_tools() -> List[types.Tool]:
                         "type": "string",
                         "description": "Ports to scan",
                         "default": "1-65535"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="task_list",
-            description="List all background security tasks",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        types.Tool(
-            name="task_stop",
-            description="Stop a running background task",
-            inputSchema={
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "ID of the task to stop",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="task_logs",
-            description="Get real-time logs for a background task",
-            inputSchema={
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "ID of the task to get logs for",
-                    },
-                    "lines": {
-                        "type": "integer",
-                        "description": "Number of lines to return",
-                        "default": 20
                     }
                 },
             },

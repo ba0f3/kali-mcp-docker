@@ -117,7 +117,7 @@ def _json_response(
     data: Optional[dict] = None,
     error: Optional[str] = None,
 ) -> Sequence[types.TextContent]:
-    """Return a single TextContent with JSON payload for all tool responses."""
+    """Return a single TextContent with JSON payload for tool responses that need structured data."""
     payload: dict = {"tool": tool, "success": success}
     if message:
         payload["message"] = message
@@ -126,6 +126,20 @@ def _json_response(
     if error is not None:
         payload["error"] = error
     return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+
+
+def _text_response(text: str) -> Sequence[types.TextContent]:
+    """Return a single TextContent with plain text (no JSON wrapper). Use for human-readable output."""
+    return [types.TextContent(type="text", text=text)]
+
+
+def _task_started_response(tool: str, task_id: str, **fields: str) -> Sequence[types.TextContent]:
+    """Return agent-parseable plain text when a background task is started. Use for async agent chaining."""
+    lines = [f"{tool}: started", f"task_id: {task_id}"]
+    for k, v in fields.items():
+        lines.append(f"{k}: {v}")
+    lines.append("Next: call task_logs(task_id=<id>) to read output.")
+    return _text_response("\n".join(lines))
 
 
 def get_current_session_dir():
@@ -227,61 +241,84 @@ async def monitor_task(task_id: str):
     task["endTime"] = datetime.datetime.now().isoformat()
     task["exitCode"] = process.returncode
 
-async def task_list() -> list:
-    """List all background tasks."""
-    if not BACKGROUND_TASKS:
-        return _json_response("task_list", True, "No background tasks found.", data={"tasks": []})
-    tasks = []
-    for tid, info in BACKGROUND_TASKS.items():
-        tasks.append({
-            "task_id": tid,
-            "status": info["status"],
-            "command": info["command"],
-            "start_time": info["startTime"],
-            "end_time": info.get("endTime"),
-            "output_file": info["outputFile"],
-        })
-    return _json_response("task_list", True, f"Found {len(tasks)} task(s).", data={"tasks": tasks})
+# --- Agent-friendly output format (stable keys for parsing) ---
+TASK_LIST_EMPTY = (
+    "task_list: 0 task(s)\n\n"
+    "No background tasks. Start a scan or long-running command with run, vulnerability_scan, etc.; "
+    "they return a task_id. Next: call task_logs(task_id=<id>) to read output."
+)
+TASK_LIST_NEXT = "\nNext: call task_logs(task_id=<id>) to read a task's output."
 
-async def task_stop(task_id: str) -> list:
-    """Stop a running background task."""
+
+async def task_list() -> Sequence[types.TextContent]:
+    """List background tasks. Returns task_id per task. Async agents: call task_logs(task_id) next to read output."""
+    if not BACKGROUND_TASKS:
+        return _text_response(TASK_LIST_EMPTY)
+    out = [f"task_list: {len(BACKGROUND_TASKS)} task(s)\n"]
+    for tid, info in BACKGROUND_TASKS.items():
+        out.append(f"task_id: {tid}")
+        out.append(f"status: {info['status']}")
+        out.append(f"command: {info['command']}")
+        out.append(f"output_file: {info['outputFile']}")
+        out.append(f"started: {info['startTime']}")
+        if info.get("endTime"):
+            out.append(f"ended: {info['endTime']}")
+        out.append("")
+    out.append(TASK_LIST_NEXT.strip())
+    return _text_response("\n".join(out))
+
+
+async def task_stop(task_id: str) -> Sequence[types.TextContent]:
+    """Stop a running background task. Async agents: call task_list to confirm."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
-        return _json_response("task_stop", False, error=f"Task '{task_id}' not found.")
+        return _text_response(f"task_stop: error\nreason: task_id not found\ntask_id: {task_id}\nNext: call task_list to see valid IDs.")
     if task["status"] != "running":
-        return _json_response("task_stop", False, error=f"Task '{task_id}' is already {task['status']}.")
+        return _text_response(f"task_stop: skipped\ntask_id: {task_id}\nreason: already {task['status']}\nNext: call task_list to see current status.")
     try:
         task["process"].terminate()
         task["status"] = "stopped"
         task["endTime"] = datetime.datetime.now().isoformat()
-        return _json_response("task_stop", True, f"Task '{task_id}' stopped.", data={"task_id": task_id})
+        return _text_response(f"task_stop: ok\ntask_id: {task_id}\nstatus: stopped\nNext: call task_list to confirm.")
     except Exception as e:
-        return _json_response("task_stop", False, error=str(e))
+        return _text_response(f"task_stop: error\ntask_id: {task_id}\nreason: {e}")
 
-async def task_logs(task_id: str, lines: int = 20) -> list:
-    """Get the tail of logs for a background task."""
+
+async def task_logs(task_id: str, lines: int = 20) -> Sequence[types.TextContent]:
+    """Read last N lines of a task's output file on the server. Use for scan/command results; do not use download_file for server files."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
-        return _json_response("task_logs", False, error=f"Task '{task_id}' not found.")
+        return _text_response(
+            f"task_logs: error\ntask_id: {task_id}\nreason: not found\n"
+            "Next: call task_list to get valid task_id values."
+        )
     output_file = task["outputFile"]
     if not os.path.exists(output_file):
-        return _json_response("task_logs", False, message="Output file not found yet.", data={"task_id": task_id, "output_file": output_file})
+        return _text_response(
+            f"task_logs: waiting\ntask_id: {task_id}\noutput_file: {output_file}\n"
+            "reason: file not ready yet\nNext: call task_logs again in a few seconds."
+        )
     try:
-        with open(output_file, 'r') as f:
+        with open(output_file, "r") as f:
             log_lines = f.readlines()
-            tail = "".join(log_lines[-lines:])
-        data = {
-            "task_id": task_id,
-            "status": task["status"],
-            "output_file": output_file,
-            "lines_shown": lines,
-            "content": tail,
-        }
+        total = len(log_lines)
+        tail = "".join(log_lines[-lines:])
+        status = task["status"]
+        exit_line = ""
         if task.get("status") == "failed" and "exitCode" in task:
-            data["exit_code"] = task["exitCode"]
-        return _json_response("task_logs", True, f"Logs for {task_id}.", data=data)
+            exit_line = f"exit_code: {task['exitCode']}\n"
+        header = (
+            f"task_id: {task_id}\n"
+            f"status: {status}\n"
+            f"lines_shown: {lines}\n"
+            f"total_lines: {total}\n"
+            f"output_file: {output_file}\n"
+            f"{exit_line}"
+            "---\n"
+        )
+        return _text_response(header + tail)
     except Exception as e:
-        return _json_response("task_logs", False, error=str(e))
+        return _text_response(f"task_logs: error\ntask_id: {task_id}\nreason: {e}")
 
 def ensure_sessions_dir():
     """Ensure sessions directory exists with proper permissions."""
@@ -589,10 +626,10 @@ async def run_command(command: str) -> Sequence[types.TextContent]:
         is_allowed, is_long_running = is_command_allowed(command)
         
         if not is_allowed:
-            return _json_response("run", False, error="Command not allowed for security reasons.")
+            return _text_response("run: error\nreason: command not allowed\ncommand: " + command[:200])
         if is_long_running:
             task_id = await register_background_task(command, "command_output.txt")
-            return _json_response("run", True, "Long-running command started.", data={"task_id": task_id, "command": command})
+            return _task_started_response("run", task_id, command=command)
         
         # For regular commands, use a timeout approach
         process = await asyncio.create_subprocess_shell(
@@ -604,15 +641,16 @@ async def run_command(command: str) -> Sequence[types.TextContent]:
         # Wait for command to complete with timeout
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60.0)
-            
             output = stdout.decode() if stdout else ""
             err = stderr.decode() if stderr else ""
-            return _json_response("run", True, "Command executed.", data={"command": command, "stdout": output, "stderr": err})
+            lines = ["run: ok", f"command: {command}", "---", "stdout:", output or "(empty)", "stderr:", err or "(empty)"]
+            return _text_response("\n".join(lines))
         except asyncio.TimeoutError:
             process.kill()
-            return _json_response("run", False, error="Command timed out after 60 seconds.")
+            return _text_response("run: error\nreason: command timed out after 60s\ncommand: " + command[:200])
     except Exception as e:
-        return _json_response("run", False, error=str(e))
+        cmd_preview = command[:200] if command else "(none)"
+        return _text_response(f"run: error\nreason: {e}\ncommand: {cmd_preview}")
 
 
 async def list_system_resources() -> Sequence[types.TextContent]:
@@ -765,8 +803,10 @@ async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> S
     # Combined command to run all tasks sequentially in one background process for easier tracking
     full_cmd = " && ".join(scan_commands)
     task_id = await register_background_task(full_cmd, output_file)
-    
-    return _json_response("vulnerability_scan", True, f"Started {scan_type} vulnerability scan on {target}.", data={"task_id": task_id, "output_file": output_file, "commands_queued": len(scan_commands)})
+    return _task_started_response(
+        "vulnerability_scan", task_id,
+        target=target, scan_type=scan_type, output_file=get_output_path(output_file), commands_queued=str(len(scan_commands))
+    )
 
 
 async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequence[types.TextContent]:
@@ -812,8 +852,7 @@ async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequen
     
     full_cmd = " && ".join(enum_commands)
     task_id = await register_background_task(full_cmd, output_file)
-    
-    return _json_response("web_enumeration", True, f"Started {enumeration_type} web enumeration on {target}.", data={"task_id": task_id, "output_file": output_file})
+    return _task_started_response("web_enumeration", task_id, target=target, enumeration_type=enumeration_type, output_file=get_output_path(output_file))
 
 
 async def network_discovery(target: str, discovery_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -855,8 +894,7 @@ async def network_discovery(target: str, discovery_type: str = "comprehensive") 
     
     full_cmd = " && ".join(discovery_commands)
     task_id = await register_background_task(full_cmd, output_file)
-    
-    return _json_response("network_discovery", True, f"Started {discovery_type} network discovery on {target}.", data={"task_id": task_id, "output_file": output_file})
+    return _task_started_response("network_discovery", task_id, target=target, discovery_type=discovery_type, output_file=get_output_path(output_file))
 
 
 # Exploit-DB website search URL (DataTables server-side API returns JSON with X-Requested-With header)
@@ -1185,14 +1223,9 @@ async def file_analysis(filepath: str) -> Sequence[types.TextContent]:
 
 async def download_file(url: str, filename: Optional[str] = None) -> Sequence[types.TextContent]:
     """
-    Download a file from a URL and save it locally.
-    
-    Args:
-        url: URL to download from
-        filename: Optional custom filename
-        
-    Returns:
-        List containing TextContent with download status
+    Download a file from an external URL (e.g. internet) into the Kali container.
+    Use this only for fetching from the internet. To read scan output or log files
+    that are already on the Kali server, use task_logs(task_id) or run('cat <path>').
     """
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     
@@ -1239,15 +1272,22 @@ async def download_file(url: str, filename: Optional[str] = None) -> Sequence[ty
             import hashlib
             file_hash = hashlib.sha256(response.content).hexdigest()
             
-            return _json_response("download_file", True, "File downloaded successfully.", data={"path": download_path, "size_bytes": file_size, "url": url, "content_type": content_type, "sha256": file_hash})
+            return _text_response(
+                f"Downloaded from {url}\n\n"
+                f"- **Saved to:** `{download_path}`\n"
+                f"- **Size:** {file_size} bytes\n"
+                f"- **Content-Type:** {content_type}\n"
+                f"- **SHA256:** {file_hash}\n\n"
+                f"You can analyze it with **file_analysis** or **run** with `cat`, `file`, etc."
+            )
     except httpx.TimeoutException:
-        return _json_response("download_file", False, error="Download timed out after 60 seconds")
+        return _text_response("Download timed out after 60 seconds.")
     except httpx.HTTPStatusError as e:
-        return _json_response("download_file", False, error=f"HTTP {e.response.status_code} - {e.response.reason_phrase}")
+        return _text_response(f"HTTP error: {e.response.status_code} - {e.response.reason_phrase}")
     except httpx.RequestError as e:
-        return _json_response("download_file", False, error=str(e))
+        return _text_response(f"Request error: {e}")
     except Exception as e:
-        return _json_response("download_file", False, error=str(e))
+        return _text_response(f"Error: {e}")
 
 
 async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[types.TextContent]:
@@ -1269,8 +1309,7 @@ async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[t
     msf_cmd = f"msfconsole -q -x 'use {module}; set RHOSTS {rhosts}; {options}; run; exit'"
     
     task_id = await register_background_task(msf_cmd, output_file)
-    
-    return _json_response("msf_exploit", True, "Metasploit module execution started.", data={"task_id": task_id, "module": module, "rhosts": rhosts, "output_file": output_file})
+    return _task_started_response("msf_exploit", task_id, module=module, rhosts=rhosts, output_file=output_file)
 
 
 async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Sequence[types.TextContent]:
@@ -1291,8 +1330,7 @@ async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Se
     nmap_cmd = f"nmap -sV -p{ports} --script {scripts} {target}"
     
     task_id = await register_background_task(nmap_cmd, output_file)
-    
-    return _json_response("nmap_nse_scan", True, "Nmap NSE script scan started.", data={"task_id": task_id, "scripts": scripts, "target": target, "ports": ports, "output_file": output_file})
+    return _task_started_response("nmap_nse_scan", task_id, target=target, scripts=scripts, ports=ports, output_file=output_file)
 
 
 async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequence[types.TextContent]:
@@ -1318,8 +1356,7 @@ async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequenc
     # Use gospider for comprehensive crawling
     spider_cmd = f"gospider -s {url} -d {depth} -c {threads}"
     task_id = await register_background_task(spider_cmd, output_file)
-    
-    return _json_response("spider_website", True, f"Started website spidering on {url}.", data={"task_id": task_id, "url": url, "depth": depth, "threads": threads, "output_file": get_output_path(output_file)})
+    return _task_started_response("spider_website", task_id, url=url, depth=str(depth), threads=str(threads), output_file=get_output_path(output_file))
 
 
 async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1350,8 +1387,7 @@ async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[
         form_cmd = f"httpx -u {url} -mc all -silent"
     
     task_id = await register_background_task(form_cmd, output_file)
-    
-    return _json_response("form_analysis", True, f"Started web form analysis on {url}.", data={"task_id": task_id, "url": url, "scan_type": scan_type, "output_file": get_output_path(output_file)})
+    return _task_started_response("form_analysis", task_id, url=url, scan_type=scan_type, output_file=get_output_path(output_file))
 
 
 async def header_analysis(url: str, include_security: bool = True) -> Sequence[types.TextContent]:
@@ -1375,8 +1411,7 @@ async def header_analysis(url: str, include_security: bool = True) -> Sequence[t
     
     header_cmd = f"curl -s -I {url}"
     task_id = await register_background_task(header_cmd, output_file)
-    
-    return _json_response("header_analysis", True, f"Started HTTP header analysis on {url}.", data={"task_id": task_id, "url": url, "output_file": get_output_path(output_file)})
+    return _task_started_response("header_analysis", task_id, url=url, output_file=get_output_path(output_file))
 
 
 async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]:
@@ -1400,8 +1435,7 @@ async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]
     # Use testssl.sh for comprehensive SSL analysis
     ssl_cmd = f"testssl.sh --quiet --color 0 {domain}:{port}"
     task_id = await register_background_task(ssl_cmd, output_file)
-    
-    return _json_response("ssl_analysis", True, f"Started SSL/TLS analysis on {domain}:{port}.", data={"task_id": task_id, "domain": domain, "port": port, "output_file": get_output_path(output_file)})
+    return _task_started_response("ssl_analysis", task_id, domain=domain, port=str(port), output_file=get_output_path(output_file))
 
 
 async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1444,8 +1478,7 @@ async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence
     
     full_cmd = " && ".join(enum_commands)
     task_id = await register_background_task(full_cmd, output_file)
-    
-    return _json_response("subdomain_enum", True, f"Started {enum_type} subdomain enumeration on {domain}.", data={"task_id": task_id, "domain": domain, "enum_type": enum_type, "output_file": get_output_path(output_file)})
+    return _task_started_response("subdomain_enum", task_id, domain=domain, enum_type=enum_type, output_file=get_output_path(output_file))
 
 
 async def web_audit(url: str, audit_type: str = "comprehensive") -> Sequence[types.TextContent]:
@@ -1494,8 +1527,7 @@ async def web_audit(url: str, audit_type: str = "comprehensive") -> Sequence[typ
     
     full_cmd = " && ".join(audit_commands)
     task_id = await register_background_task(full_cmd, output_file)
-    
-    return _json_response("web_audit", True, f"Started {audit_type} web audit on {url}.", data={"task_id": task_id, "url": url, "audit_type": audit_type, "output_file": get_output_path(output_file)})
+    return _task_started_response("web_audit", task_id, url=url, audit_type=audit_type, output_file=get_output_path(output_file))
 
 OUTPUT_FILE_PATTERNS = [
     # Core tool outputs
