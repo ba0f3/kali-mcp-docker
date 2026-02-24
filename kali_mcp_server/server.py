@@ -1,875 +1,122 @@
 """
-MCP Server implementation for Kali Linux security tools.
+MCP Server implementation for Kali Linux security tools using FastMCP.
 
 This module provides the main server functionality for the Kali MCP Server,
-including tool registration, transport configuration, and server initialization.
+including tool registration and transport configuration (stdio, SSE, HTTP).
 """
 
 import sys
-from typing import Any, Dict, List, Sequence, Union
 
-import anyio
 import click
-import mcp.types as types
-from mcp.server.lowlevel import Server
+from fastmcp import FastMCP
 
 from kali_mcp_server.tools import (
-    fetch_website, 
-    list_system_resources, 
-    run_command,
-    vulnerability_scan,
-    web_enumeration,
-    network_discovery,
-    exploit_search,
-    save_output,
     create_report,
-    file_analysis,
     download_file,
-    session_create,
-    session_list,
-    session_switch,
-    session_status,
-    session_delete,
-    session_history,
-    spider_website,
+    exploit_search,
+    fetch_website,
+    file_analysis,
     form_analysis,
     header_analysis,
+    list_system_resources,
+    msf_exploit,
+    network_discovery,
+    nmap_nse_scan,
+    run_command,
+    save_output,
+    session_create,
+    session_delete,
+    session_history,
+    session_list,
+    session_status,
+    session_switch,
+    spider_website,
     ssl_analysis,
     subdomain_enum,
-    web_audit,
-    msf_exploit,
-    nmap_nse_scan,
     task_list,
+    task_logs,
     task_stop,
-    task_logs
+    vulnerability_scan,
+    web_audit,
+    web_enumeration,
 )
 
-# Create server instance with descriptive name
-kali_server = Server("kali-mcp-server")
+# Ensure sessions directory exists on import (tools use it)
+from kali_mcp_server.tools import ensure_sessions_dir
 
+ensure_sessions_dir()
 
-@kali_server.call_tool()
-async def handle_tool_request(
-    name: str, arguments: Dict[str, Any]
-) -> Sequence[Union[types.TextContent, types.ImageContent, types.EmbeddedResource]]:
-    """
-    Handle MCP tool requests by routing to the appropriate handler.
-    
-    Args:
-        name: The name of the tool being called
-        arguments: Dictionary of arguments for the tool
-        
-    Returns:
-        Sequence of content items returned by the tool
-        
-    Raises:
-        ValueError: If the tool name is unknown or required arguments are missing
-    """
-    if name == "fetch":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        return await fetch_website(arguments["url"])
-    
-    elif name == "run":
-        if "command" not in arguments:
-            raise ValueError("Missing required argument 'command'")
-        return await run_command(arguments["command"])
-    
-    elif name == "resources":
-        return await list_system_resources()
-    
-    elif name == "vulnerability_scan":
-        if "target" not in arguments:
-            raise ValueError("Missing required argument 'target'")
-        scan_type = arguments.get("scan_type", "comprehensive")
-        return await vulnerability_scan(arguments["target"], scan_type)
-    
-    elif name == "web_enumeration":
-        if "target" not in arguments:
-            raise ValueError("Missing required argument 'target'")
-        enum_type = arguments.get("enumeration_type", "full")
-        return await web_enumeration(arguments["target"], enum_type)
-    
-    elif name == "network_discovery":
-        if "target" not in arguments:
-            raise ValueError("Missing required argument 'target'")
-        discovery_type = arguments.get("discovery_type", "comprehensive")
-        return await network_discovery(arguments["target"], discovery_type)
-    
-    elif name == "exploit_search":
-        if "search_term" not in arguments:
-            raise ValueError("Missing required argument 'search_term'")
-        search_type = arguments.get("search_type", "all")
-        return await exploit_search(arguments["search_term"], search_type)
-    
-    elif name == "save_output":
-        if "content" not in arguments:
-            raise ValueError("Missing required argument 'content'")
-        filename = arguments.get("filename")
-        category = arguments.get("category", "general")
-        return await save_output(arguments["content"], filename if filename else None, category)
-    
-    elif name == "create_report":
-        if "title" not in arguments:
-            raise ValueError("Missing required argument 'title'")
-        if "findings" not in arguments:
-            raise ValueError("Missing required argument 'findings'")
-        report_type = arguments.get("report_type", "markdown")
-        return await create_report(arguments["title"], arguments["findings"], report_type)
-    
-    elif name == "file_analysis":
-        if "filepath" not in arguments:
-            raise ValueError("Missing required argument 'filepath'")
-        return await file_analysis(arguments["filepath"])
-    
-    elif name == "download_file":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        filename = arguments.get("filename")
-        return await download_file(arguments["url"], filename if filename else None)
-    
-    elif name == "session_create":
-        if "session_name" not in arguments:
-            raise ValueError("Missing required argument 'session_name'")
-        description = arguments.get("description", "")
-        target = arguments.get("target", "")
-        return await session_create(arguments["session_name"], description, target)
-    
-    elif name == "session_list":
-        return await session_list()
-    
-    elif name == "session_switch":
-        if "session_name" not in arguments:
-            raise ValueError("Missing required argument 'session_name'")
-        return await session_switch(arguments["session_name"])
-    
-    elif name == "session_status":
-        return await session_status()
-    
-    elif name == "session_delete":
-        if "session_name" not in arguments:
-            raise ValueError("Missing required argument 'session_name'")
-        return await session_delete(arguments["session_name"])
-    
-    elif name == "session_history":
-        return await session_history()
-    
-    elif name == "spider_website":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        depth = arguments.get("depth", 2)
-        threads = arguments.get("threads", 10)
-        return await spider_website(arguments["url"], depth, threads)
-    
-    elif name == "form_analysis":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        scan_type = arguments.get("scan_type", "comprehensive")
-        return await form_analysis(arguments["url"], scan_type)
-    
-    elif name == "header_analysis":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        include_security = arguments.get("include_security", True)
-        return await header_analysis(arguments["url"], include_security)
-    
-    elif name == "ssl_analysis":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        port = arguments.get("port", 443)
-        return await ssl_analysis(arguments["url"], port)
-    
-    elif name == "subdomain_enum":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        enum_type = arguments.get("enum_type", "comprehensive")
-        return await subdomain_enum(arguments["url"], enum_type)
-    
-    elif name == "web_audit":
-        if "url" not in arguments:
-            raise ValueError("Missing required argument 'url'")
-        audit_type = arguments.get("audit_type", "comprehensive")
-        return await web_audit(arguments["url"], audit_type)
+MCP_INSTRUCTIONS = """
+This server provides security and penetration testing tools in a Kali Linux environment.
+- Use run(command) for shell commands; long-running commands (nmap, nikto, etc.) run in background and return task_id.
+- Use task_list to see background tasks, task_logs(task_id) to read output. Do not use download_file for server log files.
+- Use session_create/session_switch to organize work; scan outputs are stored per session.
+- For scans (vulnerability_scan, web_audit, msf_exploit, etc.) call task_logs(task_id) to get results.
+"""
 
-    elif name == "msf_exploit":
-        if "module" not in arguments:
-            raise ValueError("Missing required argument 'module'")
-        if "rhosts" not in arguments:
-            raise ValueError("Missing required argument 'rhosts'")
-        options = arguments.get("options", "")
-        return await msf_exploit(arguments["module"], arguments["rhosts"], options)
-    
-    elif name == "nmap_nse_scan":
-        if "target" not in arguments:
-            raise ValueError("Missing required argument 'target'")
-        if "scripts" not in arguments:
-            raise ValueError("Missing required argument 'scripts'")
-        ports = arguments.get("ports", "1-65535")
-        return await nmap_nse_scan(arguments["target"], arguments["scripts"], ports)
+mcp = FastMCP(
+    name="kali-mcp-server",
+    instructions=MCP_INSTRUCTIONS.strip(),
+)
 
-    elif name == "task_list":
-        return await task_list()
-    
-    elif name == "task_stop":
-        if "task_id" not in arguments:
-            raise ValueError("Missing required argument 'task_id'")
-        return await task_stop(arguments["task_id"])
-    
-    elif name == "task_logs":
-        if "task_id" not in arguments:
-            raise ValueError("Missing required argument 'task_id'")
-        lines = arguments.get("lines", 20)
-        return await task_logs(arguments["task_id"], lines)
-    
-    else:
-        raise ValueError(f"Unknown tool: {name}")
-
-
-@kali_server.list_tools()
-async def list_available_tools() -> List[types.Tool]:
-    """
-    Register and list all available MCP tools.
-    
-    Returns:
-        List of available Tool objects
-    """
-    return [
-        types.Tool(
-            name="fetch",
-            description="Fetch a URL and return response body. Use for quick page content. Returns: HTML/text. Sync.",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {"type": "string", "description": "URL to fetch"},
-                },
-            },
-        ),
-        types.Tool(
-            name="run",
-            description="Execute a shell command in Kali. Long-running commands (nmap, nikto, etc.) run in background. Returns: sync=stdout/stderr; background=task_id. Next: use task_logs(task_id) for background output.",
-            inputSchema={
-                "type": "object",
-                "required": ["command"],
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                },
-            },
-        ),
-        types.Tool(
-            name="task_list",
-            description="List all background tasks. Returns: task_id, status, command, output_file per task. Next: call task_logs(task_id=<id>) to read output.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="task_logs",
-            description="Read last N lines of a task's output file. Use for scan/command results from this server. Do not use download_file for server files. Returns: task_id, status, lines_shown, then content. Pass task_id from task_list or from the tool that started the task.",
-            inputSchema={
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {"type": "string", "description": "Task ID (e.g. task_1234567890)"},
-                    "lines": {"type": "integer", "description": "Number of lines (default 20)", "default": 20},
-                },
-            },
-        ),
-        types.Tool(
-            name="task_stop",
-            description="Stop a running background task. Returns: ok/skipped/error. Next: task_list to confirm.",
-            inputSchema={
-                "type": "object",
-                "required": ["task_id"],
-                "properties": {
-                    "task_id": {"type": "string", "description": "Task ID from task_list or start response"},
-                },
-            },
-        ),
-        types.Tool(
-            name="resources",
-            description="List system info and example commands. Use to discover allowed commands and workflows. Sync.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        types.Tool(
-            name="vulnerability_scan",
-            description="Start vulnerability scan (runs in background). Returns: task_id, output_file. Next: task_logs(task_id) for results.",
-            inputSchema={
-                "type": "object",
-                "required": ["target"],
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Target IP address or hostname",
-                    },
-                    "scan_type": {
-                        "type": "string",
-                        "description": "Type of scan (quick, comprehensive, web, network)",
-                        "enum": ["quick", "comprehensive", "web", "network"],
-                        "default": "comprehensive"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="web_enumeration",
-            description="Start web enumeration (background). Returns: task_id, output_file. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["target"],
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Target URL (e.g., http://example.com)",
-                    },
-                    "enumeration_type": {
-                        "type": "string",
-                        "description": "Type of enumeration (basic, full, aggressive)",
-                        "enum": ["basic", "full", "aggressive"],
-                        "default": "full"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="network_discovery",
-            description="Start network discovery/recon (background). Returns: task_id, output_file. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["target"],
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Target network (e.g., 192.168.1.0/24) or host",
-                    },
-                    "discovery_type": {
-                        "type": "string",
-                        "description": "Type of discovery (quick, comprehensive, stealth)",
-                        "enum": ["quick", "comprehensive", "stealth"],
-                        "default": "comprehensive"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="exploit_search",
-            description="Search Exploit-DB (searchsploit). Returns matches. Sync. Use before msf_exploit to pick module.",
-            inputSchema={
-                "type": "object",
-                "required": ["search_term"],
-                "properties": {
-                    "search_term": {
-                        "type": "string",
-                        "description": "Term to search for (e.g., 'apache', 'ssh', 'CVE-2021-44228')",
-                    },
-                    "search_type": {
-                        "type": "string",
-                        "description": "Type of search (all, web, remote, local, dos)",
-                        "enum": ["all", "web", "remote", "local", "dos"],
-                        "default": "all"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="save_output",
-            description="Save text to a timestamped file in session/outputs. Optional: filename, category.",
-            inputSchema={
-                "type": "object",
-                "required": ["content"],
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "Content to save",
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "Optional custom filename (without extension)",
-                    },
-                    "category": {
-                        "type": "string",
-                        "description": "Category for organizing files (e.g., 'scan', 'enum', 'evidence')",
-                        "default": "general"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="create_report",
-            description="Generate report from title and findings. Types: markdown, text, json.",
-            inputSchema={
-                "type": "object",
-                "required": ["title", "findings"],
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Report title",
-                    },
-                    "findings": {
-                        "type": "string",
-                        "description": "Findings content",
-                    },
-                    "report_type": {
-                        "type": "string",
-                        "description": "Type of report (markdown, text, json)",
-                        "enum": ["markdown", "text", "json"],
-                        "default": "markdown"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="file_analysis",
-            description="Analyze file on server: type, strings, hash. Use path from download_file or task output.",
-            inputSchema={
-                "type": "object",
-                "required": ["filepath"],
-                "properties": {
-                    "filepath": {
-                        "type": "string",
-                        "description": "Path to the file to analyze",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="download_file",
-            description="Download a file from the internet (URL) into the container. For scan/log output on the server use task_logs(task_id) or run(cat path).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "External URL to download from (e.g. https://example.com/file.zip)",
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "Optional custom filename",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="session_create",
-            description="Create a pentest session. Outputs and scans are stored per session. Optional: description, target.",
-            inputSchema={
-                "type": "object",
-                "required": ["session_name"],
-                "properties": {
-                    "session_name": {
-                        "type": "string",
-                        "description": "Name of the session",
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Description of the session",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "Target for the session",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="session_list",
-            description="List sessions and metadata. Use session_switch(name) to change active session.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        types.Tool(
-            name="session_switch",
-            description="Set active session. New scan outputs go to this session's directory.",
-            inputSchema={
-                "type": "object",
-                "required": ["session_name"],
-                "properties": {
-                    "session_name": {
-                        "type": "string",
-                        "description": "Name of the session to switch to",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="session_status",
-            description="Show current session name, path, and summary.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        types.Tool(
-            name="session_delete",
-            description="Delete a session and its stored data. Requires session_name.",
-            inputSchema={
-                "type": "object",
-                "required": ["session_name"],
-                "properties": {
-                    "session_name": {
-                        "type": "string",
-                        "description": "Name of the session to delete",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="session_history",
-            description="Show action history for the current session.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-        types.Tool(
-            name="spider_website",
-            description="Start website spider/crawl (background). Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the website to spider",
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "Maximum depth of the spider",
-                        "default": 2
-                    },
-                    "threads": {
-                        "type": "integer",
-                        "description": "Number of concurrent threads",
-                        "default": 10
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="form_analysis",
-            description="Start form discovery/analysis (background). Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the web form to analyze",
-                    },
-                    "scan_type": {
-                        "type": "string",
-                        "description": "Type of scan (comprehensive, quick)",
-                        "enum": ["comprehensive", "quick"],
-                        "default": "comprehensive"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="header_analysis",
-            description="Fetch and analyze HTTP headers (background). Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the website to analyze",
-                    },
-                    "include_security": {
-                        "type": "boolean",
-                        "description": "Include security-related headers",
-                        "default": True
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="ssl_analysis",
-            description="Start SSL/TLS assessment (background). Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the website to analyze",
-                    },
-                    "port": {
-                        "type": "integer",
-                        "description": "Port to connect to",
-                        "default": 443
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="subdomain_enum",
-            description="Start subdomain enumeration (background). Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the target website",
-                    },
-                    "enum_type": {
-                        "type": "string",
-                        "description": "Type of enumeration (comprehensive, quick)",
-                        "enum": ["comprehensive", "quick"],
-                        "default": "comprehensive"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="web_audit",
-            description="Start web app audit (nikto, gobuster, etc.) in background. Returns: task_id. Next: task_logs(task_id).",
-            inputSchema={
-                "type": "object",
-                "required": ["url"],
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "URL of the website to audit",
-                    },
-                    "audit_type": {
-                        "type": "string",
-                        "description": "Type of audit (comprehensive, quick)",
-                        "enum": ["comprehensive", "quick"],
-                        "default": "comprehensive"
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="msf_exploit",
-            description="Run Metasploit module (background). Returns: task_id. Next: task_logs(task_id). Options: module path, rhosts, optional options string.",
-            inputSchema={
-                "type": "object",
-                "required": ["module", "rhosts"],
-                "properties": {
-                    "module": {
-                        "type": "string",
-                        "description": "Metasploit module (e.g., 'exploit/windows/smb/ms17_010_eternalblue')",
-                    },
-                    "rhosts": {
-                        "type": "string",
-                        "description": "Target host(s)",
-                    },
-                    "options": {
-                        "type": "string",
-                        "description": "Additional MSF options (e.g., 'PAYLOAD=windows/x64/meterpreter/reverse_tcp')",
-                    }
-                },
-            },
-        ),
-        types.Tool(
-            name="nmap_nse_scan",
-            description="Run Nmap with NSE scripts (background). Returns: task_id. Next: task_logs(task_id). Scripts e.g. vuln, http-enum.",
-            inputSchema={
-                "type": "object",
-                "required": ["target", "scripts"],
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "description": "Target IP or hostname",
-                    },
-                    "scripts": {
-                        "type": "string",
-                        "description": "NSE scripts to run (e.g., 'vuln', 'http-enum')",
-                    },
-                    "ports": {
-                        "type": "string",
-                        "description": "Ports to scan",
-                        "default": "1-65535"
-                    }
-                },
-            },
-        ),
-    ]
+# --- Register all tools (FastMCP infers name and schema from function signature and docstring) ---
+mcp.add_tool(fetch_website)
+mcp.add_tool(run_command)
+mcp.add_tool(task_list)
+mcp.add_tool(task_logs)
+mcp.add_tool(task_stop)
+mcp.add_tool(list_system_resources)
+mcp.add_tool(vulnerability_scan)
+mcp.add_tool(web_enumeration)
+mcp.add_tool(network_discovery)
+mcp.add_tool(exploit_search)
+mcp.add_tool(save_output)
+mcp.add_tool(create_report)
+mcp.add_tool(file_analysis)
+mcp.add_tool(download_file)
+mcp.add_tool(session_create)
+mcp.add_tool(session_list)
+mcp.add_tool(session_switch)
+mcp.add_tool(session_status)
+mcp.add_tool(session_delete)
+mcp.add_tool(session_history)
+mcp.add_tool(spider_website)
+mcp.add_tool(form_analysis)
+mcp.add_tool(header_analysis)
+mcp.add_tool(ssl_analysis)
+mcp.add_tool(subdomain_enum)
+mcp.add_tool(web_audit)
+mcp.add_tool(msf_exploit)
+mcp.add_tool(nmap_nse_scan)
 
 
 @click.command()
 @click.option("--port", default=8000, help="Port to listen on for HTTP/SSE connections")
 @click.option(
     "--transport",
-    type=click.Choice(["stdio", "sse"]),
-    default="sse",
-    help="Transport type (stdio for command line, sse for Claude Desktop)"
+    type=click.Choice(["stdio", "sse", "http"]),
+    default="http",
+    help="Transport: stdio (local), sse (legacy HTTP), http (Streamable HTTP)",
 )
-@click.option(
-    "--debug", 
-    is_flag=True, 
-    default=False, 
-    help="Enable debug mode"
-)
-def main(port: int, transport: str, debug: bool) -> int:
+@click.option("--host", default="0.0.0.0", help="Host to bind to (for sse/http)")
+@click.option("--debug", is_flag=True, default=False, help="Enable debug mode")
+def main(port: int, transport: str, host: str, debug: bool) -> int:
     """
     Start the Kali MCP Server with the specified transport.
-    
-    Args:
-        port: Port number to listen on when using SSE transport
-        transport: Transport type (stdio or SSE)
-        debug: Enable debug mode
-        
-    Returns:
-        Exit code (0 for success)
     """
+    if transport == "stdio":
+        print("Starting Kali MCP Server (stdio transport)", file=sys.stderr)
+        mcp.run()
+        return 0
+    # SSE or HTTP: run with host and port
+    print(f"Starting Kali MCP Server on {host}:{port} (transport={transport})", file=sys.stderr)
     if transport == "sse":
-        return start_sse_server(port, debug)
+        print(f"  SSE (legacy): http://localhost:{port}/sse", file=sys.stderr)
     else:
-        return start_stdio_server(debug)
-
-
-def start_sse_server(port: int, debug: bool) -> int:
-    """
-    Start the server with SSE and Streamable HTTP transports.
-
-    - SSE (legacy): GET /sse, POST /messages/?session_id=...
-    - Streamable HTTP: /mcp (GET=SSE, POST=200+JSON or SSE, DELETE=terminate).
-
-    Args:
-        port: Port number to listen on
-        debug: Enable debug mode
-
-    Returns:
-        Exit code (0 for success)
-    """
-    import contextlib
-    import uvicorn
-    from mcp.server.sse import SseServerTransport
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-    from starlette.applications import Starlette
-    from starlette.responses import Response
-    from starlette.routing import Mount, Route
-
-    # Legacy SSE transport for /sse + /messages/
-    sse_transport = SseServerTransport("/messages/")
-
-    # Adapter so StreamableHTTPSessionManager can call run(..., stateless=) even when
-    # the installed mcp Server.run() does not accept the stateless parameter.
-    class _StreamableHTTPServerAdapter:
-        def __init__(self, server):
-            self._server = server
-
-        def __getattr__(self, name):
-            return getattr(self._server, name)
-
-        async def run(self, read_stream, write_stream, init_options, stateless=None):
-            try:
-                return await self._server.run(
-                    read_stream, write_stream, init_options, stateless=stateless
-                )
-            except TypeError:
-                return await self._server.run(
-                    read_stream, write_stream, init_options
-                )
-
-    # Streamable HTTP: session manager for /mcp (requires lifespan).
-    streamable_session_manager = StreamableHTTPSessionManager(
-        _StreamableHTTPServerAdapter(kali_server),
-        json_response=True,
-        stateless=False,
-    )
-
-    class StreamableHTTPApp:
-        """ASGI app that delegates to StreamableHTTPSessionManager.handle_request."""
-
-        def __init__(self, session_manager: StreamableHTTPSessionManager):
-            self._session_manager = session_manager
-
-        async def __call__(self, scope, receive, send):
-            await self._session_manager.handle_request(scope, receive, send)
-
-    streamable_http_app = StreamableHTTPApp(streamable_session_manager)
-
-    @contextlib.asynccontextmanager
-    async def lifespan(app: Starlette):
-        async with streamable_session_manager.run():
-            yield
-
-    async def handle_sse_connection(request):
-        """Handle incoming SSE connections at /sse."""
-        try:
-            async with sse_transport.connect_sse(
-                request.scope, request.receive, request._send
-            ) as streams:
-                await kali_server.run(
-                    streams[0], streams[1], kali_server.create_initialization_options()
-                )
-        except Exception as e:
-            if debug:
-                import traceback
-                print(f"SSE connection error: {e}")
-                traceback.print_exc()
-            pass
-        return Response()
-
-    class PostMessageApp:
-        """ASGI app wrapper for handle_post_message with error handling."""
-        def __init__(self, transport):
-            self.transport = transport
-            self.debug = debug
-
-        async def __call__(self, scope, receive, send):
-            try:
-                await self.transport.handle_post_message(scope, receive, send)
-            except Exception as e:
-                from anyio import ClosedResourceError
-                if isinstance(e, ClosedResourceError):
-                    return
-                if self.debug:
-                    import traceback
-                    print(f"Post message error: {e}")
-                    traceback.print_exc()
-                raise
-
-    # Routes: legacy SSE + Streamable HTTP /mcp
-    starlette_app = Starlette(
-        debug=debug,
-        routes=[
-            Route("/sse", endpoint=handle_sse_connection),
-            Mount("/messages/", app=PostMessageApp(sse_transport)),
-            Mount("/mcp", app=streamable_http_app),
-        ],
-        lifespan=lifespan,
-    )
-
-    print(f"Starting Kali MCP Server on port {port}")
-    print(f"  SSE (legacy):     http://localhost:{port}/sse")
-    print(f"  Streamable HTTP: http://localhost:{port}/mcp")
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
-    return 0
-
-
-def start_stdio_server(debug: bool) -> int:
-    """
-    Start the server with stdio transport for command-line usage.
-    
-    Args:
-        debug: Enable debug mode
-        
-    Returns:
-        Exit code (0 for success)
-    """
-    from mcp.server.stdio import stdio_server
-
-    async def start_stdio_connection():
-        """Initialize and run the stdio server."""
-        # Stdio transport uses stdout for JSON-RPC; log to stderr only
-        print("Starting Kali MCP Server with stdio transport", file=sys.stderr)
-        async with stdio_server() as streams:
-            await kali_server.run(
-                streams[0], streams[1], kali_server.create_initialization_options()
-            )
-
-    # Run the server
-    anyio.run(start_stdio_connection)
+        print(f"  Streamable HTTP: http://localhost:{port}/mcp", file=sys.stderr)
+    mcp.run(transport=transport, host=host, port=port)
     return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

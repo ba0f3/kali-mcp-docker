@@ -55,17 +55,13 @@ pip install <package-name>
 
 ## Architecture
 
-The project is structured as a Python MCP server with three main components:
+The project uses **FastMCP** for the MCP server. Layout:
 
-1. `kali_mcp_server/server.py` - Core server implementation that handles MCP protocol
-2. `kali_mcp_server/tools.py` - Implementation of the tools offered by the server
-3. Main entry points: `main.py` and `kali_mcp_server/__main__.py`
+1. **`kali_mcp_server/server.py`** – FastMCP app: creates `FastMCP(name="kali-mcp-server")`, registers all tools with `mcp.add_tool(...)`, and runs with `mcp.run(transport=..., port=...)`. Supports transports: `stdio`, `sse`, `http`.
+2. **`kali_mcp_server/tools.py`** – Tool implementations; each tool is an async function that returns a `str` (FastMCP sends it as the tool result). Includes task lifecycle (`task_list`, `task_logs`, `task_stop`), sessions, scans, and helpers.
+3. **Entry points** – `main.py` and `kali_mcp_server/__main__.py` call the Click `main()` in server (e.g. `--transport sse --port 8000`).
 
-The server provides three main tools through the MCP protocol:
-
-1. `run` - Execute shell commands in the Kali Linux environment
-2. `fetch` - Fetch web content from specified URLs
-3. `resources` - List available system resources and command examples
+Tools include: `run`, `fetch`, `resources`, `task_list`, `task_logs`, `task_stop`, session tools, and scan tools (`vulnerability_scan`, `web_audit`, `msf_exploit`, `nmap_nse_scan`, etc.).
 
 Commands are validated against an allowlist for security, and long-running commands are executed in the background.
 

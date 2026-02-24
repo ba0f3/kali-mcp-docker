@@ -13,10 +13,9 @@ import json
 import os
 import platform
 import re
-from typing import Optional, Sequence, Union
+from typing import Optional, Union
 
 import httpx
-import mcp.types as types
 
 # List of allowed commands for security purposes
 # Format: (command_prefix, is_long_running)
@@ -116,8 +115,8 @@ def _json_response(
     message: str = "",
     data: Optional[dict] = None,
     error: Optional[str] = None,
-) -> Sequence[types.TextContent]:
-    """Return a single TextContent with JSON payload for tool responses that need structured data."""
+) -> str:
+    """Return JSON string for tool responses that need structured data."""
     payload: dict = {"tool": tool, "success": success}
     if message:
         payload["message"] = message
@@ -125,21 +124,21 @@ def _json_response(
         payload["data"] = data
     if error is not None:
         payload["error"] = error
-    return [types.TextContent(type="text", text=json.dumps(payload, indent=2))]
+    return json.dumps(payload, indent=2)
 
 
-def _text_response(text: str) -> Sequence[types.TextContent]:
-    """Return a single TextContent with plain text (no JSON wrapper). Use for human-readable output."""
-    return [types.TextContent(type="text", text=text)]
+def _text_response(text: str) -> str:
+    """Return plain text for human-readable output (FastMCP passes through as tool result)."""
+    return text
 
 
-def _task_started_response(tool: str, task_id: str, **fields: str) -> Sequence[types.TextContent]:
-    """Return agent-parseable plain text when a background task is started. Use for async agent chaining."""
+def _task_started_response(tool: str, task_id: str, **fields: str) -> str:
+    """Return agent-parseable plain text when a background task is started."""
     lines = [f"{tool}: started", f"task_id: {task_id}"]
     for k, v in fields.items():
         lines.append(f"{k}: {v}")
     lines.append("Next: call task_logs(task_id=<id>) to read output.")
-    return _text_response("\n".join(lines))
+    return "\n".join(lines)
 
 
 def get_current_session_dir():
@@ -250,7 +249,7 @@ TASK_LIST_EMPTY = (
 TASK_LIST_NEXT = "\nNext: call task_logs(task_id=<id>) to read a task's output."
 
 
-async def task_list() -> Sequence[types.TextContent]:
+async def task_list() -> str:
     """List background tasks. Returns task_id per task. Async agents: call task_logs(task_id) next to read output."""
     if not BACKGROUND_TASKS:
         return _text_response(TASK_LIST_EMPTY)
@@ -268,7 +267,7 @@ async def task_list() -> Sequence[types.TextContent]:
     return _text_response("\n".join(out))
 
 
-async def task_stop(task_id: str) -> Sequence[types.TextContent]:
+async def task_stop(task_id: str) -> str:
     """Stop a running background task. Async agents: call task_list to confirm."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
@@ -284,7 +283,7 @@ async def task_stop(task_id: str) -> Sequence[types.TextContent]:
         return _text_response(f"task_stop: error\ntask_id: {task_id}\nreason: {e}")
 
 
-async def task_logs(task_id: str, lines: int = 20) -> Sequence[types.TextContent]:
+async def task_logs(task_id: str, lines: int = 20) -> str:
     """Read last N lines of a task's output file on the server. Use for scan/command results; do not use download_file for server files."""
     task = BACKGROUND_TASKS.get(task_id)
     if not task:
@@ -386,7 +385,7 @@ def create_session(session_name, description, target):
 
 # --- Session Management Tools ---
 
-async def session_create(session_name: str, description: str = "", target: str = "") -> list:
+async def session_create(session_name: str, description: str = "", target: str = "") -> str:
     """
     Create a new pentest session.
     Args:
@@ -405,7 +404,7 @@ async def session_create(session_name: str, description: str = "", target: str =
         return _json_response("session_create", False, error=str(e))
 
 
-async def session_list() -> list:
+async def session_list() -> str:
     """
     List all pentest sessions with metadata.
     Returns:
@@ -436,7 +435,7 @@ async def session_list() -> list:
         return _json_response("session_list", False, error=str(e))
 
 
-async def session_switch(session_name: str) -> list:
+async def session_switch(session_name: str) -> str:
     """
     Switch to a different pentest session.
     Args:
@@ -459,7 +458,7 @@ async def session_switch(session_name: str) -> list:
         return _json_response("session_switch", False, error=str(e))
 
 
-async def session_status() -> list:
+async def session_status() -> str:
     """
     Show current session status and summary.
     Returns:
@@ -491,7 +490,7 @@ async def session_status() -> list:
         return _json_response("session_status", False, error=str(e))
 
 
-async def session_delete(session_name: str) -> list:
+async def session_delete(session_name: str) -> str:
     """
     Delete a pentest session and all its evidence.
     Args:
@@ -519,7 +518,7 @@ async def session_delete(session_name: str) -> list:
         return _json_response("session_delete", False, error=str(e))
 
 
-async def session_history() -> list:
+async def session_history() -> str:
     """
     Show command/evidence history for the current session.
     Returns:
@@ -541,7 +540,7 @@ async def session_history() -> list:
         return _json_response("session_history", False, error=str(e))
 
 
-async def fetch_website(url: str) -> Sequence[Union[types.TextContent, types.ImageContent, types.EmbeddedResource]]:
+async def fetch_website(url: str) -> str:
     """
     Fetch content from a specified URL.
     
@@ -603,7 +602,7 @@ def is_command_allowed(command: str) -> tuple[bool, bool]:
     return False, False
 
 
-async def run_command(command: str) -> Sequence[types.TextContent]:
+async def run_command(command: str) -> str:
     """
     Execute a shell command in the Kali Linux environment.
     
@@ -653,7 +652,7 @@ async def run_command(command: str) -> Sequence[types.TextContent]:
         return _text_response(f"run: error\nreason: {e}\ncommand: {cmd_preview}")
 
 
-async def list_system_resources() -> Sequence[types.TextContent]:
+async def list_system_resources() -> str:
     """
     List available system resources and provide command examples.
     
@@ -759,7 +758,7 @@ async def list_system_resources() -> Sequence[types.TextContent]:
     return _json_response("resources", True, "System resources and command examples.", data={"system_info": system_info, "resources": resources})
 
 
-async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> Sequence[types.TextContent]:
+async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> str:
     """
     Perform automated vulnerability assessment with multiple tools.
     
@@ -809,7 +808,7 @@ async def vulnerability_scan(target: str, scan_type: str = "comprehensive") -> S
     )
 
 
-async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequence[types.TextContent]:
+async def web_enumeration(target: str, enumeration_type: str = "full") -> str:
     """
     Perform comprehensive web application discovery and enumeration.
     
@@ -855,7 +854,7 @@ async def web_enumeration(target: str, enumeration_type: str = "full") -> Sequen
     return _task_started_response("web_enumeration", task_id, target=target, enumeration_type=enumeration_type, output_file=get_output_path(output_file))
 
 
-async def network_discovery(target: str, discovery_type: str = "comprehensive") -> Sequence[types.TextContent]:
+async def network_discovery(target: str, discovery_type: str = "comprehensive") -> str:
     """
     Perform multi-stage network reconnaissance and discovery.
     
@@ -901,7 +900,7 @@ async def network_discovery(target: str, discovery_type: str = "comprehensive") 
 EXPLOIT_DB_SEARCH_URL = "https://www.exploit-db.com/search"
 
 
-async def exploit_search(search_term: str, search_type: str = "all") -> Sequence[types.TextContent]:
+async def exploit_search(search_term: str, search_type: str = "all") -> str:
     """
     Search for exploits on https://www.exploit-db.com (Exploit Database website).
     
@@ -1017,7 +1016,7 @@ async def exploit_search(search_term: str, search_type: str = "all") -> Sequence
     )
 
 
-async def save_output(content: str, filename: Optional[str] = None, category: str = "general") -> Sequence[types.TextContent]:
+async def save_output(content: str, filename: Optional[str] = None, category: str = "general") -> str:
     """
     Save content to a timestamped file for evidence collection.
     
@@ -1056,7 +1055,7 @@ async def save_output(content: str, filename: Optional[str] = None, category: st
         return _json_response("save_output", False, error=str(e))
 
 
-async def create_report(title: str, findings: str, report_type: str = "markdown") -> Sequence[types.TextContent]:
+async def create_report(title: str, findings: str, report_type: str = "markdown") -> str:
     """
     Generate a structured report from findings.
     
@@ -1145,7 +1144,7 @@ Generated on {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         return _json_response("create_report", False, error=str(e))
 
 
-async def file_analysis(filepath: str) -> Sequence[types.TextContent]:
+async def file_analysis(filepath: str) -> str:
     """
     Analyze a file using various tools (file type, strings, hash).
     
@@ -1221,7 +1220,7 @@ async def file_analysis(filepath: str) -> Sequence[types.TextContent]:
     return _json_response("file_analysis", True, "File analysis completed.", data={"analysis_file": analysis_file, "size_chars": len(full_analysis), "preview": full_analysis[:500] + ("..." if len(full_analysis) > 500 else "")})
 
 
-async def download_file(url: str, filename: Optional[str] = None) -> Sequence[types.TextContent]:
+async def download_file(url: str, filename: Optional[str] = None) -> str:
     """
     Download a file from an external URL (e.g. internet) into the Kali container.
     Use this only for fetching from the internet. To read scan output or log files
@@ -1290,7 +1289,7 @@ async def download_file(url: str, filename: Optional[str] = None) -> Sequence[ty
         return _text_response(f"Error: {e}")
 
 
-async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[types.TextContent]:
+async def msf_exploit(module: str, rhosts: str, options: str = "") -> str:
     """
     Execute a Metasploit module against a target.
     
@@ -1312,7 +1311,7 @@ async def msf_exploit(module: str, rhosts: str, options: str = "") -> Sequence[t
     return _task_started_response("msf_exploit", task_id, module=module, rhosts=rhosts, output_file=output_file)
 
 
-async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Sequence[types.TextContent]:
+async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> str:
     """
     Perform a targeted Nmap scan with NSE scripts.
     
@@ -1333,7 +1332,7 @@ async def nmap_nse_scan(target: str, scripts: str, ports: str = "1-65535") -> Se
     return _task_started_response("nmap_nse_scan", task_id, target=target, scripts=scripts, ports=ports, output_file=output_file)
 
 
-async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequence[types.TextContent]:
+async def spider_website(url: str, depth: int = 2, threads: int = 10) -> str:
     """
     Perform comprehensive web crawling and spidering.
     
@@ -1359,7 +1358,7 @@ async def spider_website(url: str, depth: int = 2, threads: int = 10) -> Sequenc
     return _task_started_response("spider_website", task_id, url=url, depth=str(depth), threads=str(threads), output_file=get_output_path(output_file))
 
 
-async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[types.TextContent]:
+async def form_analysis(url: str, scan_type: str = "comprehensive") -> str:
     """
     Discover and analyze web forms for security testing.
     
@@ -1390,7 +1389,7 @@ async def form_analysis(url: str, scan_type: str = "comprehensive") -> Sequence[
     return _task_started_response("form_analysis", task_id, url=url, scan_type=scan_type, output_file=get_output_path(output_file))
 
 
-async def header_analysis(url: str, include_security: bool = True) -> Sequence[types.TextContent]:
+async def header_analysis(url: str, include_security: bool = True) -> str:
     """
     Analyze HTTP headers for security information and misconfigurations.
     
@@ -1414,7 +1413,7 @@ async def header_analysis(url: str, include_security: bool = True) -> Sequence[t
     return _task_started_response("header_analysis", task_id, url=url, output_file=get_output_path(output_file))
 
 
-async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]:
+async def ssl_analysis(url: str, port: int = 443) -> str:
     """
     Perform SSL/TLS security assessment.
     
@@ -1438,7 +1437,7 @@ async def ssl_analysis(url: str, port: int = 443) -> Sequence[types.TextContent]
     return _task_started_response("ssl_analysis", task_id, domain=domain, port=str(port), output_file=get_output_path(output_file))
 
 
-async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence[types.TextContent]:
+async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> str:
     """
     Perform subdomain enumeration using multiple tools.
     
@@ -1481,7 +1480,7 @@ async def subdomain_enum(url: str, enum_type: str = "comprehensive") -> Sequence
     return _task_started_response("subdomain_enum", task_id, domain=domain, enum_type=enum_type, output_file=get_output_path(output_file))
 
 
-async def web_audit(url: str, audit_type: str = "comprehensive") -> Sequence[types.TextContent]:
+async def web_audit(url: str, audit_type: str = "comprehensive") -> str:
     """
     Perform comprehensive web application security audit.
     

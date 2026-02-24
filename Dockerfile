@@ -54,4 +54,4 @@ RUN touch /app/command_output.txt && mkdir -p /app/outputs /app/sessions
 EXPOSE 8000
 
 # Run the server with SSE transport
-CMD ["python", "-m", "kali_mcp_server.server", "--transport", "sse", "--port", "8000"]
+CMD ["python", "-m", "kali_mcp_server.server", "--transport", "http", "--port", "8000"]
